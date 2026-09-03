@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { RemoteMachine } from '../../src/types.ts'
-import { formatRemoteUrl, keyRefForName, parseRemoteUrl, RemoteUrlError } from '../../src/url.ts'
+import {
+  formatRemoteUrl, keyRefForName, normalizeFingerprint, parseRemoteUrl, RemoteUrlError,
+} from '../../src/url.ts'
 
 describe('parseRemoteUrl', () => {
   it('解析完整 URL', () => {
@@ -41,6 +43,10 @@ describe('parseRemoteUrl', () => {
     expect(parseRemoteUrl('dsh-remote://me@ExAmple.COM/?name=box').host).toBe('example.com')
   })
 
+  it('展开形式的 IPv6 host 会被压缩成规范形式', () => {
+    expect(parseRemoteUrl('dsh-remote://me@[0:0:0:0:0:0:0:1]/?name=box').host).toBe('[::1]')
+  })
+
   it('fp 前缀大小写不敏感，且会被归一化成小写（ssh-keygen -lf 打印的是大写 SHA256:）', () => {
     const m = parseRemoteUrl('dsh-remote://me@h.test/?name=box&fp=SHA256%3AAbC%2B%2F123')
     expect(m.hostFingerprint).toBe('sha256:AbC+/123')
@@ -52,16 +58,18 @@ describe('parseRemoteUrl', () => {
     ['缺 name', 'dsh-remote://me@h.test/', 'MISSING_NAME'],
     ['name 非法', 'dsh-remote://me@h.test/?name=has%20space', 'BAD_NAME'],
     ['port 越界', 'dsh-remote://me@h.test:99999/?name=box', 'BAD_PORT'],
-    // port 0 在 WHATWG URL 看来是合法端口（不会在 new URL() 阶段抛错），
-    // 是我们自己在 assertValidMachine 里补的范围检查（port >= 1）把它挡下来的——
-    // 这条用例证明那条检查不是死代码，删掉它这里就会回归。
+    // port 0 通不过 new URL()（WHATWG 不会在这一步抛错），
+    // 靠 normalizeAndValidate 的范围检查挡下来——这条用例证明那条
+    // 检查不是死代码。
     ['port 为 0', 'dsh-remote://me@h.test:0/?name=box', 'BAD_PORT'],
     ['整个串不是 URL', 'not a url at all', 'BAD_URL'],
-    // 一个孤立的 % 是合法的 userinfo 字符（WHATWG URL 会原样保留），
-    // 但作为 percent-encoding 去 decodeURIComponent 时是畸形的——
-    // 之前这里会抛出未包装的 URIError，而不是 RemoteUrlError。
+    // 孤立的 % 是合法的 userinfo 字符（WHATWG 原样保留），但拿去
+    // decodeURIComponent 是畸形的转义。
     ['用户名含非法转义', 'dsh-remote://a%b@h.test/?name=box', 'BAD_URL'],
     ['fp 格式不对', 'dsh-remote://me@h.test/?name=box&fp=not-a-fingerprint', 'BAD_FINGERPRINT'],
+    // 非 ASCII host 会被 WHATWG percent-encode 成一串乱码而不是拒绝，
+    // 必须显式挡住，让用户改用 punycode。
+    ['host 含非 ASCII 字符', 'dsh-remote://me@%E4%BE%8B%E3%81%88.jp/?name=box', 'BAD_URL'],
   ])('拒绝：%s', (_label, input, code) => {
     try {
       parseRemoteUrl(input)
@@ -99,6 +107,14 @@ describe('formatRemoteUrl', () => {
     expect(url).toBe('dsh-remote://me@example.com/?name=box')
   })
 
+  it('fp 前缀会被归一化成小写再序列化——format 与 parse 用同一套归一化', () => {
+    const url = formatRemoteUrl({
+      name: 'box', host: 'h.test', port: 22, user: 'me',
+      keyRef: 'REMOTE_KEY_BOX', tags: [], hostFingerprint: 'SHA256:AbC+/123',
+    })
+    expect(url).toContain('fp=sha256%3AAbC%2B%2F123')
+  })
+
   it.each([
     [
       'port 越界（曾经会被 WHATWG 的 port setter 静默丢弃，序列化出端口 22 的 URL）',
@@ -106,9 +122,24 @@ describe('formatRemoteUrl', () => {
       'BAD_PORT',
     ],
     [
+      'port 是字符串（表单输入的常见形状）——类型错，不是"越界"',
+      { name: 'box', host: 'h.test', port: '22', user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_PORT',
+    ],
+    [
       'name 非法',
       { name: 'has space', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
       'BAD_NAME',
+    ],
+    [
+      'name 是 undefined（曾经会序列化成 name=undefined 并解析回一条"合法"记录）',
+      { name: undefined, host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_NAME',
+    ],
+    [
+      'keyRef 与 name 派生值不一致（曾经会被往返悄悄改指到别的凭据条目）',
+      { name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_SHARED', tags: [] },
+      'BAD_KEY_REF',
     ],
     [
       'user 为空（曾经会序列化成一个 parse 会拒绝的 URL，往返不是逆运算）',
@@ -118,6 +149,11 @@ describe('formatRemoteUrl', () => {
     [
       'tags 不是数组（曾经会抛出未包装的 TypeError: not iterable）',
       { name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: undefined },
+      'BAD_TAG',
+    ],
+    [
+      'tags 里混进了非字符串',
+      { name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [123] },
       'BAD_TAG',
     ],
     [
@@ -133,10 +169,9 @@ describe('formatRemoteUrl', () => {
       },
       'BAD_FINGERPRINT',
     ],
-    // 下面这一组都是「host 校验只看 new URL() 会不会抛」的漏洞：WHATWG
-    // 对 host 位置里的 '/', '?', '#', '@', ':' 不会抛错，而是悄悄把
-    // 字符串重新切分成别的部分。只有最后一条（含空格）会让 new URL()
-    // 真正抛错——这也是为什么之前只测这一条会给出错误的安全感。
+    // 下面这一组都是「只看 new URL() 会不会抛」骗过 host 校验的写法：
+    // WHATWG 对 '/', '?', '#', '@', ':' 不抛错，而是把字符串重新
+    // 切分成别的部分。只有含空格那条会让 new URL() 真正抛错。
     [
       'host 里混进了端口（会被当成端口 2222，而不是 host 的一部分）',
       { name: 'box', host: 'h.test:2222', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
@@ -163,8 +198,18 @@ describe('formatRemoteUrl', () => {
       'BAD_URL',
     ],
     [
+      'host 是 undefined（曾经会抛出未包装的 TypeError）',
+      { name: 'box', host: undefined, port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
       'host 含空格（唯一一种会让 new URL() 直接抛错的畸形 host）',
       { name: 'box', host: 'h test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 含非 ASCII 字符（会被 percent-encode 成谁也连不上的乱码）',
+      { name: 'box', host: '例え.jp', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
       'BAD_URL',
     ],
   ])('拒绝：%s', (_label, machine, code) => {
@@ -177,45 +222,66 @@ describe('formatRemoteUrl', () => {
     }
   })
 
-  it.each([
+  const ROUND_TRIP_CASES: Array<[string, RemoteMachine, RemoteMachine]> = [
     [
       '最简单的情况：默认端口、无 tags、无 fp',
-      { name: 'a', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_A', tags: [] } satisfies RemoteMachine,
-      { name: 'a', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_A', tags: [] } satisfies RemoteMachine,
+      { name: 'a', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_A', tags: [] },
+      { name: 'a', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_A', tags: [] },
     ],
     [
       '大写 host + 非默认端口 + 多个 tags',
       {
         name: 'b', host: 'H.Test', port: 2222, user: 'root', keyRef: 'REMOTE_KEY_B', tags: ['x', 'y'],
-      } satisfies RemoteMachine,
+      },
       {
         name: 'b', host: 'h.test', port: 2222, user: 'root', keyRef: 'REMOTE_KEY_B', tags: ['x', 'y'],
-      } satisfies RemoteMachine,
+      },
     ],
     [
-      'IPv6 host + 大写 fp 前缀',
+      'IPv6 host（压缩形式）+ 大写 fp 前缀',
       {
         name: 'c', host: '[::1]', port: 22, user: 'me', keyRef: 'REMOTE_KEY_C', tags: ['gpu'],
         hostFingerprint: 'SHA256:AbC+/123',
-      } satisfies RemoteMachine,
+      },
       {
         name: 'c', host: '[::1]', port: 22, user: 'me', keyRef: 'REMOTE_KEY_C', tags: ['gpu'],
         hostFingerprint: 'sha256:AbC+/123',
-      } satisfies RemoteMachine,
+      },
+    ],
+    [
+      'IPv6 host（展开形式会被压缩）',
+      { name: 'e', host: '[0:0:0:0:0:0:0:1]', port: 22, user: 'me', keyRef: 'REMOTE_KEY_E', tags: [] },
+      { name: 'e', host: '[::1]', port: 22, user: 'me', keyRef: 'REMOTE_KEY_E', tags: [] },
     ],
     [
       '端口取到上边界 + defaultWorkdir，无 tags',
       {
         name: 'd', host: 'gpu.example.com', port: 65535, user: 'me', keyRef: 'REMOTE_KEY_D', tags: [],
         defaultWorkdir: '/root/work',
-      } satisfies RemoteMachine,
+      },
       {
         name: 'd', host: 'gpu.example.com', port: 65535, user: 'me', keyRef: 'REMOTE_KEY_D', tags: [],
         defaultWorkdir: '/root/work',
-      } satisfies RemoteMachine,
+      },
     ],
-  ])('批量往返：%s', (_label, input, expected) => {
+    [
+      '末尾带点的合法 FQDN 写法会被保留',
+      { name: 'f', host: 'h.test.', port: 22, user: 'me', keyRef: 'REMOTE_KEY_F', tags: [] },
+      { name: 'f', host: 'h.test.', port: 22, user: 'me', keyRef: 'REMOTE_KEY_F', tags: [] },
+    ],
+  ]
+
+  it.each(ROUND_TRIP_CASES)('批量往返：%s', (_label, input, expected) => {
     expect(parseRemoteUrl(formatRemoteUrl(input))).toEqual(expected)
+  })
+
+  // 不依赖任何手写字面量的性质测试：format 应当是幂等的——先归一化
+  // 一次之后再走一遍 parse→format，字符串必须原样不变。这条测试不需要
+  // 知道归一化的具体规则是什么，规则本身和字面量一旦互相漂移，
+  // 它就会挂（例如 format 曾经不归一化 fp 前缀时，这条就会失败）。
+  it.each(ROUND_TRIP_CASES)('format∘parse 是幂等的: %s', (_label, input) => {
+    const once = formatRemoteUrl(input)
+    expect(formatRemoteUrl(parseRemoteUrl(once))).toBe(once)
   })
 })
 
@@ -228,5 +294,12 @@ describe('keyRefForName', () => {
     expect(keyRefForName('my-box')).toBe('REMOTE_KEY_MY_BOX')
     expect(keyRefForName('my_box')).toBe('REMOTE_KEY_MY_BOX')
     expect(keyRefForName('my-box')).toBe(keyRefForName('my_box'))
+  })
+})
+
+describe('normalizeFingerprint', () => {
+  it('只归一化前缀大小写，base64 payload 原样保留', () => {
+    expect(normalizeFingerprint('SHA256:AbC+/123')).toBe('sha256:AbC+/123')
+    expect(normalizeFingerprint('sha256:AbC+/123')).toBe('sha256:AbC+/123')
   })
 })

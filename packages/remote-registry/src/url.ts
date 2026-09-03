@@ -1,33 +1,26 @@
 /**
- * `dsh-remote://` URL 的解析与生成。
+ * `dsh-remote://` URL 的解析与生成——Mac 端生成器与手机端解析器之间的契约。
  *
  * 语法：dsh-remote://user@host[:port]/?name=&tags=&fp=&workdir=
  *
- * - `user`（userinfo）与 `name` 参数为必填，其余全部可选。
- * - `port` 省略时默认为 22。
- * - `tags` 为逗号分隔列表，省略时视为空数组；单个 tag 会被 trim，
- *   且不允许包含逗号（否则往返序列化时会被错误地拆成两个 tag）。
- * - `fp` 为服务器主机公钥指纹，格式固定为 `sha256:<base64>`；前缀
- *   大小写不敏感（`ssh-keygen -lf` 打印的就是大写的 `SHA256:`），
- *   parseRemoteUrl 会把前缀归一化成小写，避免 `SHA256:` 与
- *   `sha256:` 在下游（Task 9 的主机指纹校验）被当成两个不同的指纹。
- * - `workdir` 为远程默认工作目录，不做进一步校验。
- * - **未识别的参数会被忽略**——这是有意为之，用来给协议留出向前兼容的
- *   空间：新版本的生成端可以携带旧版本解析端不认识的参数，旧解析端
- *   应当照常工作而不是报错。
- * - `host` 在 parse 和 format 两个方向都会被归一化成小写——`dsh-remote:`
- *   是非特殊 scheme，WHATWG URL 不会替我们做大小写归一化，用户在表单
- *   里敲 `Example.COM` 不应当报错，但序列化结果和内部存储都统一用
- *   小写，避免同一台机器因为大小写不同被当成两条记录。
- *
- * 这份文件是 Mac 端生成器与手机端解析器之间的契约，应当能脱离上下文
- * 单独读懂。
+ * - `user`、`name` 必填，其余可选；`port` 省略时默认为 22。
+ * - `tags` 逗号分隔，省略视为空数组；每项会被 trim，且不允许包含逗号。
+ * - `fp` 为 `sha256:<base64>`；前缀大小写不敏感（`ssh-keygen -lf` 打印
+ *   的是大写 `SHA256:`），会被归一化成小写前缀，payload 原样保留。
+ * - `host` 会被归一化成 WHATWG 的规范形式：小写、IPv6 压缩、去掉写法
+ *   差异。非 ASCII host 会被拒绝——请提供 punycode（如 `xn--...`），
+ *   这个包不做 Unicode→punycode 转换。带 zone id 的链路本地地址（如
+ *   `[fe80::1%eth0]`）不支持：WHATWG 的 IPv6 解析器本身就拒绝 `%`。
+ * - `keyRef` 永远由 `name` 派生（见 keyRefForName），不能单独指定；
+ *   与派生值不一致会被拒绝。
+ * - `workdir` 不做校验。
+ * - **未识别的参数会被忽略**——为协议向前兼容留出空间。
  */
 import type { RemoteMachine } from './types.ts'
 
 export type RemoteUrlErrorCode =
   | 'BAD_URL' | 'BAD_SCHEME' | 'MISSING_USER' | 'MISSING_NAME'
-  | 'BAD_NAME' | 'BAD_PORT' | 'BAD_TAG' | 'BAD_FINGERPRINT'
+  | 'BAD_NAME' | 'BAD_PORT' | 'BAD_TAG' | 'BAD_FINGERPRINT' | 'BAD_KEY_REF'
 
 export class RemoteUrlError extends Error {
   readonly code: RemoteUrlErrorCode
@@ -47,99 +40,129 @@ const MAX_PORT = 65535
 /** 机器名：字母数字起头，其后允许字母数字、连字符、点、下划线。 */
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-/**
- * 主机公钥指纹：`sha256:<base64>` 形式；前缀大小写不敏感——
- * `ssh-keygen -lf` 打印的就是大写的 `SHA256:`。base64 载荷部分本身
- * 是大小写敏感的，不能一起转小写，所以这里只对前缀做 `/i`，具体的
- * 归一化在 normalizeFingerprint 里只处理前缀。
- */
+/** 主机公钥指纹：`sha256:<base64>`，前缀大小写不敏感。 */
 const FINGERPRINT_RE = /^sha256:[A-Za-z0-9+/]+=*$/i
 
-/** 把指纹的前缀大小写归一化成小写，payload 部分原样保留。 */
-function normalizeFingerprint(fp: string): string {
+const ASCII_RE = /^[\x00-\x7F]*$/
+
+/**
+ * host 是否全 ASCII——同时防住两种来路：format 方向的原始 Unicode
+ * （如 '例え.jp'），以及 parse 方向的 host（此时 new URL() 已经把
+ * Unicode percent-encode 成一串 ASCII 乱码，`%E4%BE%8B...`，本身
+ * 通过朴素的 ASCII 检查，必须 decode 回来再判一次）。
+ */
+function isAsciiHost(host: string): boolean {
+  if (!ASCII_RE.test(host)) return false
+  try {
+    return ASCII_RE.test(decodeURIComponent(host))
+  } catch {
+    return true
+  }
+}
+
+/** 把指纹的前缀归一化成小写；base64 payload 大小写敏感，原样保留。 */
+export function normalizeFingerprint(fp: string): string {
   return fp.replace(/^sha256:/i, 'sha256:')
 }
 
 /**
  * 由机器名推导凭据引用名，保证是合法的环境变量名。
  *
- * 注意：这个映射不是单射——例如 'my-box' 与 'my_box' 都会映射到
- * 'REMOTE_KEY_MY_BOX'。这是已知且接受的行为：keyRef 的唯一性由
- * registry（Task 8）在 add() 时校验并拒绝冲突，不在这里处理。
+ * 注意：这个映射不是单射——'my-box' 与 'my_box' 都会映射到
+ * 'REMOTE_KEY_MY_BOX'。已知且接受：keyRef 的跨机器唯一性由
+ * registry（Task 8）在 add() 时校验，不在这里处理。
  */
 export function keyRefForName(name: string): string {
   return `REMOTE_KEY_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`
 }
 
 /**
- * 校验一台机器描述是否满足 URL 语法能表达的约束。parseRemoteUrl 与
- * formatRemoteUrl 共用这一套规则，保证两者互为逆运算——但要注意：
- * formatRemoteUrl 会先把 host 归一化成小写再校验、再序列化，所以严格
- * 来说 `parseRemoteUrl(formatRemoteUrl(m))` 对比的是「host 已小写化
- * 的 m」，而不是任意大小写的原始 m（用户在表单里敲 `Example.COM`
- * 不该报错，只是序列化结果会是小写）。
- *
- * BAD_TAG 只可能从 format 方向抛出：parse 是把整个 tags 参数按逗号
- * 切开来产生数组的，切出来的每一项天然不可能再包含逗号。
+ * 校验并归一化一台机器描述，返回一份新的、字段已规范化的副本。
+ * parseRemoteUrl 与 formatRemoteUrl 都通过它——保证两者互为逆运算，
+ * 也保证没有调用方能在字段被检查前就用到它（例如对 host 调用
+ * `.toLowerCase()`）。
  */
-function assertValidMachine(machine: RemoteMachine): void {
-  if (!machine.user) throw new RemoteUrlError('user 不能为空', 'MISSING_USER')
+function normalizeAndValidate(machine: RemoteMachine): RemoteMachine {
+  if (typeof machine.user !== 'string' || !machine.user) {
+    throw new RemoteUrlError('user 不能为空', 'MISSING_USER')
+  }
 
-  if (!NAME_RE.test(machine.name)) {
+  if (typeof machine.name !== 'string' || !NAME_RE.test(machine.name)) {
     throw new RemoteUrlError(
       `机器名不合法: ${machine.name}（只允许字母数字与 . _ -，且须字母数字开头）`,
       'BAD_NAME',
     )
   }
 
-  if (!Number.isInteger(machine.port) || machine.port < 1 || machine.port > MAX_PORT) {
+  // keyRef 只能是 name 的派生值，不能被指向别的凭据条目再靠 URL 带走。
+  const expectedKeyRef = keyRefForName(machine.name)
+  if (machine.keyRef !== expectedKeyRef) {
+    throw new RemoteUrlError(
+      `keyRef 必须由 name 派生: 期望 ${expectedKeyRef}，实际 ${machine.keyRef}`,
+      'BAD_KEY_REF',
+    )
+  }
+
+  // 类型和范围分开报——`port: '22'`（字符串）是类型错，不是"越界"。
+  if (typeof machine.port !== 'number' || !Number.isInteger(machine.port)) {
+    throw new RemoteUrlError(`端口必须是整数: ${machine.port}`, 'BAD_PORT')
+  }
+  if (machine.port < 1 || machine.port > MAX_PORT) {
     throw new RemoteUrlError(`端口越界: ${machine.port}`, 'BAD_PORT')
   }
 
-  // 不能默认调用方真的传了个数组——tags 是这个校验函数里唯一一个不做
-  // 类型防御就直接 for...of 的字段，会在拿到 `undefined` 时抛出裸的
-  // TypeError，重蹈 decodeURIComponent 那次同样的“信任自己的类型标注
-  // 超过信任运行时输入”的错。
   if (!Array.isArray(machine.tags)) {
     throw new RemoteUrlError('tags 必须是字符串数组', 'BAD_TAG')
   }
   for (const tag of machine.tags) {
-    if (tag.includes(',')) {
-      throw new RemoteUrlError(`标签不能包含逗号: ${tag}`, 'BAD_TAG')
+    // 逗号是 tags 的分隔符，含逗号的 tag 在往返序列化时会被拆成两个。
+    if (typeof tag !== 'string' || tag.includes(',')) {
+      throw new RemoteUrlError(`标签不合法: ${tag}`, 'BAD_TAG')
     }
   }
 
-  if (machine.hostFingerprint && !FINGERPRINT_RE.test(machine.hostFingerprint)) {
-    throw new RemoteUrlError(`host 指纹格式不合法: ${machine.hostFingerprint}`, 'BAD_FINGERPRINT')
+  let hostFingerprint = machine.hostFingerprint
+  if (hostFingerprint) {
+    if (!FINGERPRINT_RE.test(hostFingerprint)) {
+      throw new RemoteUrlError(`host 指纹格式不合法: ${hostFingerprint}`, 'BAD_FINGERPRINT')
+    }
+    hostFingerprint = normalizeFingerprint(hostFingerprint)
   }
 
-  if (!machine.host) throw new RemoteUrlError('host 不能为空', 'BAD_URL')
-  // 只看 new URL() 会不会抛，不足以验证 host：WHATWG 对 host 位置里的
-  // '/', '?', '#', '@', ':' 并不会抛错，而是悄悄把整个字符串重新
-  // 切分成别的部分（host、port、userinfo、path 混在了一起）。这正是
-  // 当初 formatRemoteUrl 端口越界被静默丢弃那个 bug 的同一种失效
-  // 模式——一个“没抛错”的校验其实什么都没挡住，反而会把
-  // `host: 'h.test:2222'`（端口写错地方了）序列化成一个端口真的是
-  // 2222 的 URL。所以这里改成正向断言：把 host 单独塞进一个探测用的
-  // URL 之后，解析出来的 hostname/username/port/path/query/hash 必须
-  // 恰好对应“只有一个 host，别的什么都没有”；任何一项走样，都说明
-  // host 字符串里混进了不该出现在这个位置的分隔符。
+  if (typeof machine.host !== 'string' || !machine.host) {
+    throw new RemoteUrlError('host 不能为空', 'BAD_URL')
+  }
+  if (!isAsciiHost(machine.host)) {
+    // 非 ASCII host 会被 WHATWG percent-encode 成一串谁也连不上的乱码
+    // （不是 punycode），而且悄悄"成功"——必须在这里挡住。
+    throw new RemoteUrlError(`host 含非 ASCII 字符: ${machine.host}（请提供 punycode 形式，如 xn--...）`, 'BAD_URL')
+  }
+  // 先转小写再探测：普通域名的大小写折叠靠我们自己做（WHATWG 对
+  // 非特殊 scheme 的 host 不会折叠大小写），IPv6 压缩等则靠探测结果。
   let probe: URL
   try {
-    probe = new URL(`${REMOTE_URL_SCHEME}//${machine.host}/`)
+    probe = new URL(`${REMOTE_URL_SCHEME}//${machine.host.toLowerCase()}/`)
   } catch {
     throw new RemoteUrlError(`host 不合法: ${machine.host}`, 'BAD_URL')
   }
-  if (
-    probe.hostname !== machine.host.toLowerCase()
-    || probe.username
-    || probe.port
-    || probe.pathname !== '/'
-    || probe.search
-    || probe.hash
-  ) {
+  // 只看"抛没抛错"不够：WHATWG 对 host 位置里的 '/','?','#','@',':'
+  // 不抛错，而是把字符串悄悄重新切分成别的部分。这里正向断言探测
+  // 结果里除了 host 什么都没有，把 host 里混入的额外分隔符挡住。
+  if (probe.username || probe.port || probe.pathname !== '/' || probe.search || probe.hash) {
     throw new RemoteUrlError(`host 不合法: ${machine.host}`, 'BAD_URL')
   }
+
+  const result: RemoteMachine = {
+    name: machine.name,
+    host: probe.hostname,
+    port: machine.port,
+    user: machine.user,
+    keyRef: machine.keyRef,
+    tags: machine.tags,
+  }
+  if (hostFingerprint) result.hostFingerprint = hostFingerprint
+  if (machine.defaultWorkdir) result.defaultWorkdir = machine.defaultWorkdir
+  return result
 }
 
 export function parseRemoteUrl(input: string): RemoteMachine {
@@ -147,12 +170,10 @@ export function parseRemoteUrl(input: string): RemoteMachine {
   try {
     url = new URL(input)
   } catch {
-    // WHATWG 的 URL 构造函数在端口超出 0..65535 范围时会直接整体抛错，
-    // 我们根本来不及走到自己的范围检查——这里单独识别“协议+host+越界
-    // 端口”这个形状，让它报出语义明确的 BAD_PORT，而不是笼统的
-    // BAD_URL。要求端口后面紧跟路径/查询/片段分隔符或字符串结尾，
-    // 是为了避免把 `:99999abc` 这类根本不是端口的畸形串也误判成
-    // “端口越界”。
+    // WHATWG 在端口超出 0..65535 时于 new URL() 阶段直接整体抛错，
+    // 这里从原始字符串里把这一种情况单独挑出来报成 BAD_PORT；
+    // 要求端口后紧跟分隔符或结尾，避免把 `:99999abc` 这类畸形串
+    // 误判成"越界"。
     const portMatch = input.match(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/?#]*@)?[^/:?#]+:(\d+)(?:[/?#]|$)/)
     if (portMatch && Number(portMatch[1]) > MAX_PORT) {
       throw new RemoteUrlError(`端口越界: ${portMatch[1]}`, 'BAD_PORT')
@@ -171,45 +192,31 @@ export function parseRemoteUrl(input: string): RemoteMachine {
   }
   if (!user) throw new RemoteUrlError('URL 缺少用户名（应为 user@host）', 'MISSING_USER')
 
+  // 参数缺失（MISSING_NAME）与参数存在但不合法（BAD_NAME）是两种
+  // 不同的错误码，必须在调用共享校验之前分开判断。
   const name = url.searchParams.get('name')
   if (!name) throw new RemoteUrlError('URL 缺少 name 参数', 'MISSING_NAME')
 
   const port = url.port ? Number(url.port) : DEFAULT_SSH_PORT
-
   const tagsRaw = url.searchParams.get('tags')
   const machine: RemoteMachine = {
     name,
-    // dsh-remote: 是非特殊 scheme，host 是“不透明主机”，WHATWG URL 不会
-    // 帮我们做大小写归一化——自己转小写，避免 'Example.com' 和
-    // 'example.com' 在 registry 里被当成两台不同的机器。
-    host: url.hostname.toLowerCase(),
+    host: url.hostname,
     port,
     user,
     keyRef: keyRefForName(name),
     tags: tagsRaw ? tagsRaw.split(',').map((tag) => tag.trim()).filter(Boolean) : [],
   }
   const fp = url.searchParams.get('fp')
-  if (fp) machine.hostFingerprint = normalizeFingerprint(fp)
+  if (fp) machine.hostFingerprint = fp
   const workdir = url.searchParams.get('workdir')
   if (workdir) machine.defaultWorkdir = workdir
 
-  // 复用与 formatRemoteUrl 相同的校验，统一给出 BAD_NAME / BAD_PORT /
-  // BAD_FINGERPRINT 等错误码（未识别的 `fp` 值到这里才会被拒绝）。
-  assertValidMachine(machine)
-  return machine
+  return normalizeAndValidate(machine)
 }
 
 export function formatRemoteUrl(machine: RemoteMachine): string {
-  // host 归一化成小写再校验、再序列化：parse 方向已经这么做了，这里
-  // 保持一致，让往返结果幂等——用户在表单里敲 'Example.COM' 不该
-  // 报错，只是序列化出来的 URL 和存回去的记录都会是小写。
-  const normalized: RemoteMachine = { ...machine, host: machine.host.toLowerCase() }
-
-  // 先校验再序列化：WHATWG 的 `port` setter 对非法端口是静默 no-op
-  // （不会抛错，也不会报错，只是什么都不做），如果不预先校验，
-  // 一个越界端口的 RemoteMachine 会被悄悄序列化成一个端口是 22 的
-  // URL——这是数据静默丢失，比抛错更危险。
-  assertValidMachine(normalized)
+  const normalized = normalizeAndValidate(machine)
 
   const url = new URL(`${REMOTE_URL_SCHEME}//${normalized.host}/`)
   url.username = encodeURIComponent(normalized.user)

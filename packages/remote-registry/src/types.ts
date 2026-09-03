@@ -5,7 +5,11 @@ export interface RemoteMachine {
   host: string
   port: number
   user: string
-  /** 指向 .credentials.yaml 里的条目名，如 'REMOTE_KEY_GPU_H20'。 */
+  /**
+   * 指向 .credentials.yaml 里的条目名，如 'REMOTE_KEY_GPU_H20'。
+   * 由 `name` 派生（见 url.ts 的 keyRefForName），不能单独设置——
+   * url.ts 的 normalizeAndValidate 会拒绝与派生值不一致的 keyRef。
+   */
   keyRef: string
   /** 路由用标签，如 ['gpu', 'cuda']。 */
   tags: string[]

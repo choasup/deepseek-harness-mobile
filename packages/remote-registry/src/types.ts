@@ -18,3 +18,15 @@ export interface RemoteMachine {
   /** 远程默认工作目录。 */
   defaultWorkdir?: string
 }
+
+/**
+ * 连接一台机器所需的认证材料。由 dsh-credentials 解出 keyRef 对应的条目后
+ * 产出，只在内存里传递，不落盘、不进这份类型定义之外的任何地方。
+ * 三个字段都可选——具体传哪个由凭据条目的类型决定（密码 vs 私钥），
+ * ssh2 的 Client#connect 本身也接受两者之一或都不传（走 agent/其他方式）。
+ */
+export interface SshCredentials {
+  password?: string
+  privateKey?: string | Buffer
+  passphrase?: string
+}

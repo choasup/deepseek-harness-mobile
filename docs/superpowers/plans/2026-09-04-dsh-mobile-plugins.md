@@ -914,6 +914,11 @@ verifier 内的闭包标志，不能匹配 level 字符串。
 | I2 | `clients.delete(key)` 不校验 client 身份，而 `disposeAll` 清 map 却不摘监听器 | 半开 socket 的迟到 `close` 会驱逐掉**后来占用同一 key 的新连接** |
 | I3 | `ready` 之后的 error 被 no-op 的 `settle()` 静默吞掉 | 中途断连没有任何人收到通知 |
 
+**后续项（Task 5 复审发现）**：连接池只传了 `readyTimeout`，而 ssh2 的
+`keepaliveInterval` 默认是 0（禁用）。所以一条被黑洞化的 socket 永远不会死——
+手机切换网络时正是这种情况。应补上 `keepaliveInterval` / `keepaliveCountMax`，
+让死链接自己超时，而不是靠上层的看门狗兜底。
+
 修法：C1 用**代数计数器**（不是布尔，否则池释放后不可复用）；I1 把已验证的指纹
 与 client 一起记录，请求的 pin 不同则驱逐重连；I2 加 `if (this.clients.get(key) === client)`；
 I3 给池加可选的 `onDisconnect(machine, error?)` 回调，并把 ready 后的 error 路由过去。
@@ -1179,6 +1184,61 @@ export function execRemote(client: Client, options: RemoteExecOptions): Promise<
 
 `stdoutMaxBytes` 对 stdout 和 stderr 各自独立计数——与 `dsh-bash-local` 的行为一致，`ShellRunResult` 里两者也是分开的 `CollectedOutput`。
 
+**实施中实测出的 ssh2 行为，上面的草稿有几处会出错**：
+
+| 观察 | 后果 |
+| --- | --- |
+| 流上**不挂 `data` 监听器就永远不触发 `close`**（paused 模式），只有 `exit` | promise **永久挂起**。必须在 exec 回调里同步给 `stream` 和 `stream.stderr` 都挂上 |
+| `stream.close()` 中途取消时触发 `close` 但**不触发 `exit`** | `exitCode` 必须默认 null，只能由真实 `exit` 事件赋值 |
+| `client.exec()` 对已 `end()` 的 client **同步抛** `Error('Not connected')`，回调根本不被调用 | 只处理回调里的 err 不够 |
+| 真实中途断连时，client 和 stream **只有 `close`，没有 `error`、没有 `exit`** | 这正是"看起来像成功"的失败：不特判就会返回 `{exitCode: null}` 当作正常结果 |
+| `exit` 给的信号名**已带 `SIG` 前缀**（夹具传的是 `'TERM'`） | 不要重复加前缀 |
+
+**还有一个真正的正确性 bug（不是崩溃，是静默执行错位置）**：
+
+```sh
+cd '/missing' && export F='y' && echo LINE1
+echo LINE2
+```
+
+**换行打断了 `&&` 链**——用真 `/bin/sh` 实测，`cd` 失败后 `LINE2` 照样执行。
+也就是说 agent 要求"在 /root/build 里跑这段多行脚本"，而该目录不存在时，
+脚本会**在家目录里跑**。想象里面有 `rm -rf ./*`。
+
+修法：有 workdir/env 前缀时把命令体包进子 shell，且**闭括号单独一行**
+（实测：`( cmd # 注释 )` 会把闭括号吞进注释导致语法错误）：
+
+```sh
+cd '/x' && export F='y' && (
+<command>
+)
+```
+
+`env` 的**键**是不带引号插值的（值有引号），所以 `X; rm -rf /` 这样的键
+会变成命令——必须按 `/^[A-Za-z_][A-Za-z0-9_]*$/` 校验并抛错。
+
+**契约变更**：`execRemote` 现在**可能 reject**，不只是 resolve。超时与取消
+仍然是 resolve + 标志位，但**连接丢失会 reject** 一个 `SshError('SSH_DISCONNECTED')`。
+Task 6/7 必须 try/catch 并按 `isSshError` 路由，不能假设每次调用都 resolve。
+
+**必须有绝对的 settle 期限。** 超时定时器若装在 `client.exec()` 回调之后，
+就管不到"socket 还开着但对端不响应 channel-open"这种情况——**手机从 Wi-Fi
+切到蜂窝正是这个形态**，而这是个手机项目。要在 `client.exec()` **之前**就
+装看门狗，并在 `stream.close()` 之后再装一个宽限定时器强制 settle。
+
+**截断保留尾部，不是头部。** `dsh-subprocess` 的 `CollectedOutput.text`
+明确写着 *"the TAIL of the stream when truncated"*。失败的构建、堆栈跟踪，
+信息都在尾部。注意镜像细节：尾部语义下跨界的多字节字符落在**开头**，
+需要一个 `trimIncompleteUtf8Tail` 的头部对偶函数。
+
+**已经 abort 的 signal 必须在执行前就拦住。** `addEventListener('abort')`
+对已 abort 的 signal 永不触发，所以要在入口先查 `signal.aborted`，
+否则"用户取消了但命令照样在远程跑完"。
+
+**`SSH_DISCONNECTED` 要能区分"命令没启动"和"跑到一半断了"。** 前者可以安全重试
+（请求根本没到服务器），后者绝不能静默重试——`make install`、`rm`、`git push`
+可能已经执行了一半。在错误上带一个 `started: boolean`。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/shell-ssh/tests/unit/exec.test.ts`
@@ -1195,7 +1255,15 @@ git commit -m "feat(shell-ssh): 远程执行、输出截断、超时与取消"
 
 ## Task 6: `SshShellExecutor` 服务
 
-**先定一条安全语义**（实施 Task 4 期间查证 `dsh-sandbox` 后补入）：
+**两条来自 Task 5 的约束**：
+
+1. `execRemote` **可能 reject**（连接丢失时抛 `SshError('SSH_DISCONNECTED')`），
+   超时/取消仍是 resolve + 标志位。`run()` 与 `start()` 都要处理这两种形态。
+2. `onData` **不受 `stdoutMaxBytes` 限制**，它按收到的每一段回调。`start()` 若把
+   它直接累加进 `pending` 字符串，一条输出几个 GB 的命令会把内存吃光。
+   `start()` 必须自己加上限，并在 `ShellProcessRead.lossy` 上如实标记丢弃。
+
+**再定一条安全语义**（实施 Task 4 期间查证 `dsh-sandbox` 后补入）：
 
 `ShellRunResult.sandbox` 是 `{ mode, denied, enforcement }`，dsh 用它告诉模型和用户
 **"这条命令是否被沙箱拦截过、约束有多完整"**。本地的 `dsh-bash-sandbox` 通过

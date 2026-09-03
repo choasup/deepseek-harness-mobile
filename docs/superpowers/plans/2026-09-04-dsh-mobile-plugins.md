@@ -1627,6 +1627,23 @@ git commit -m "feat(shell-ssh): SshShellExecutor，实现 resolve/run/start"
 
 ## Task 7: cordis 适配层
 
+> **执行顺序调整：本任务推迟到 Task 10 之后。**
+> 原计划把它排在第 7 位，但它注入 `remotes` 并调用 `ctx.remotes.get()` /
+> `credentialsFor()`——而 `RemoteRegistry` 要到 Task 8 才存在、cordis 接线要到
+> Task 10。所以原计划里它的测试**只测了一个 zod schema**，真正的装配完全没验。
+>
+> 实际顺序：**8 → 9 → 10 → 7 → 11 → 12 → 13**。Task 8/9 与本任务无依赖关系，
+> 先做它们不损失任何东西，而做完之后本任务就能对着真实的 `ctx.remotes` 装配。
+
+> **cordis 插件是可以真测的，不要只测 schema。** 参考
+> `/Users/choas/Solution/Tencent-ADP-dsh-plugin/tests/mock/harness.ts`
+> 的 `bootViaLoader`：`new Context()` → `ctx.plugin(Loader, { baseUrl })`
+> → 挂上测试替身服务（它自己写了个 `MemoryCredentials extends CredentialProvider`）
+> → `ctx.loader.create({ id, name: <入口文件 URL>, config })` 加载被测插件。
+> 之后就能断言服务真的注册进了 `ctx.shell` / `ctx.remotes` 并且能工作。
+>
+> Task 7 与 Task 10 应共用一个这样的夹具（放 `tests/mock/harness.ts`）。
+
 **Task 6 交接过来的三件事**：
 
 1. `run()` 在连接丢失时 reject，而 `SshError` 上带着 `partialStdout` / `partialStderr`
@@ -2291,7 +2308,13 @@ git commit -m "feat(remote-registry): 分层连接探针"
 
 **Files:**
 - Modify: `packages/remote-registry/src/index.ts`（在既有 barrel 上追加接线）
-- Test: `packages/remote-registry/tests/unit/index.test.ts`
+- Create: `packages/remote-registry/tests/mock/harness.ts`（cordis 启动夹具，Task 7 也用）
+- Test: `packages/remote-registry/tests/composition/plugin.test.ts`
+
+**不要只测导出面。** 参考 ADP 插件的 `tests/mock/harness.ts`：起一个真的
+`Context`，挂 `Loader` 与测试替身（`CredentialProvider` 的内存实现、
+`storageDomain` 的内存实现），再 `ctx.loader.create()` 加载本插件，
+断言 `ctx.remotes` 真的可用、增删查改真的落到存储上、密钥真的走 credentials。
 
 - [ ] **Step 1: 写失败的测试**
 

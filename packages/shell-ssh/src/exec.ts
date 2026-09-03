@@ -9,14 +9,29 @@ export interface RemoteExecOptions {
   command: string
   timeoutMs: number
   /**
-   * 每个流（stdout、stderr 各自独立计数）最多保留多少字节。超出的部分从
-   * **头部**丢弃，只保留最新的这么多字节（"尾部"语义）——跟 dsh 本地执行
-   * 的 `CollectedOutput` 约定一致（其文档明确写着 "the TAIL of the stream
-   * when truncated"）：命令失败时有价值的通常是最后几行（报错、堆栈），
-   * 不是开头。保留的是一个随数据到达不断从前面收缩的滑动窗口，不是"收完
-   * 全部再截断"，内存占用有界。
+   * stdout 最多保留多少字节。超出的部分从**头部**丢弃，只保留最新的这么
+   * 多字节（"尾部"语义）——跟 dsh 本地执行的 `CollectedOutput` 约定一致
+   * （其文档明确写着 "the TAIL of the stream when truncated"）：命令失败
+   * 时有价值的通常是最后几行（报错、堆栈），不是开头。保留的是一个随数据
+   * 到达不断从前面收缩的滑动窗口，不是"收完全部再截断"，内存占用有界。
+   *
+   * Task 6 review 修复：曾经这一个字段被同时用作 stdout 和 stderr 两个流
+   * 各自的窗口预算，跟 dsh-shell 的 `ShellExecSpec.stdoutMaxBytes` 文档原文
+   * 相矛盾——"run() uses it for stdout; background jobs and stderr keep the
+   * executor's own output cap"，即调用方为 stdout 传入的覆盖值绝不该顺带
+   * 影响 stderr 的留存预算（例如一个把 stdoutMaxBytes 调小到 100 字节去
+   * 精确解析一小段 stdout 的调用方，会在没有请求的情况下把自己需要读的
+   * 报错信息也截没了）。见下面的 `stderrMaxBytes`。
    */
   stdoutMaxBytes: number
+  /**
+   * stderr 独立于 stdoutMaxBytes 的留存预算，语义与截断算法跟 stdout 完全
+   * 一致（头部丢弃、尾部滑动窗口）。**未提供时退化为 stdoutMaxBytes**——
+   * 这只是为了不破坏这个字段引入之前就存在的调用方（这个包自己的
+   * `run()`/`start()` 现在总是显式传两个值，不依赖这条退化路径）；新增
+   * 调用方不应该依赖它，应该总是显式传两者。
+   */
+  stderrMaxBytes?: number
   workdir?: string
   env?: Record<string, string>
   stdin?: string
@@ -368,16 +383,23 @@ export function execRemote(client: Client, options: RemoteExecOptions): Promise<
           }
         }
 
+        // Task 6 review 修复：stderr 曾经跟 stdout 共用同一个
+        // options.stdoutMaxBytes 阈值——跟 dsh-shell 的文档矛盾（见上面
+        // RemoteExecOptions.stdoutMaxBytes 的注释）。这里按流选阈值：
+        // stdout 用 stdoutMaxBytes；stderr 用 stderrMaxBytes，未提供时才
+        // 退化为 stdoutMaxBytes（仅为兼容这个字段引入之前的调用方）。
+        const maxBytesForStream = which === 'stdout' ? options.stdoutMaxBytes : (options.stderrMaxBytes ?? options.stdoutMaxBytes)
+
         // 尾部滑动窗口：新数据永远追加在后面，然后从窗口最前面按需丢弃，
-        // 直到窗口内字节数回到 stdoutMaxBytes 以内。跟"收完全部再截断"
-        // 不同，这里任意时刻窗口内存占用都有界（至多 stdoutMaxBytes 加
-        // 上最后一次追加的那个 chunk 的大小）。
+        // 直到窗口内字节数回到预算以内。跟"收完全部再截断"不同，这里任意
+        // 时刻窗口内存占用都有界（至多这个预算加上最后一次追加的那个
+        // chunk 的大小）。
         state.chunks.push(chunk)
         state.windowBytes += chunk.length
-        if (state.windowBytes > options.stdoutMaxBytes) state.truncated = true
-        while (state.chunks.length > 0 && state.windowBytes > options.stdoutMaxBytes) {
+        if (state.windowBytes > maxBytesForStream) state.truncated = true
+        while (state.chunks.length > 0 && state.windowBytes > maxBytesForStream) {
           const front = state.chunks[0]!
-          const excess = state.windowBytes - options.stdoutMaxBytes
+          const excess = state.windowBytes - maxBytesForStream
           if (front.length <= excess) {
             state.chunks.shift()
             state.windowBytes -= front.length

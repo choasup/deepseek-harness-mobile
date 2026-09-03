@@ -26,8 +26,30 @@
  * below) and `dshEnv` is a dsh-runtime-owned snapshot type this package has
  * no reason to import. Task 7's adapter is expected to pass
  * `sandboxPolicy: undefined` through untouched when it calls the real
- * `resolve()`/hands specs to this executor, and to merge `dshEnv` into
- * `env` (or extend `ExecSpecLike`) if a future task needs it.
+ * `resolve()`/hands specs to this executor.
+ *
+ * `dshEnv` is a DIFFERENT kind of gap from `sandboxPolicy` — not inert,
+ * genuinely dropped, and NOT cheap to add correctly (checked, not assumed;
+ * a review asked specifically whether this was a quick fix). Adding a
+ * `dshEnv?: Record<string, string>` field to `ExecRequestLike`/
+ * `ExecSpecLike` and merging it into `env` is trivial by itself, but it
+ * would only be a correct implementation of HALF of dsh's documented
+ * contract. `ShellExecRequest.dshEnv`'s own doc comment: "Executors discard
+ * ambient `DSH_*` entries before merging this snapshot last, so an
+ * unavailable current fact cannot inherit a stale value from the harness
+ * process." That "discard ambient entries" half matters concretely here:
+ * if the harness stops setting some `DSH_FOO` between one call and the
+ * next, a naive merge (export whatever's in the current snapshot, on top
+ * of whatever's already there) does nothing to remove a `DSH_FOO` a PRIOR
+ * call already exported into that persistent remote shell session — it
+ * would keep reading the stale value forever. Doing this correctly over
+ * SSH means either enumerating and `unset`-ing every previously-exported
+ * `DSH_*` key before applying the current snapshot (this executor has no
+ * record of what a past call exported — it isn't a persistent session
+ * object, `buildRemoteCommand()` composes one command string per call) or
+ * accepting the gap and documenting it. Left undone here; flagging for
+ * Task 7 rather than shipping a merge that silently satisfies only the
+ * easy half of the contract.
  *
  * Verified this is inert, not just unread by this file: `dsh-shell`'s own
  * `ShellExecutor` base class never reads `sandboxPolicy` at runtime (only
@@ -108,11 +130,13 @@ export interface ShellProcessReadLike {
    * Output produced since the previous read. Stdout and stderr deltas
    * accumulated since the last read are concatenated, with stderr placed
    * under a `[stderr]` marker WHEN PRESENT (no marker at all when there is
-   * no stderr in this delta). This exact wording and behavior come from
-   * `dsh-bash-local`'s own package description: it "merges offset-based
-   * stdout/stderr reads into one consuming delta, placing stderr under a
-   * `[stderr]` marker when present" — not invented here, so don't
-   * re-derive a different format later.
+   * no stderr in this delta). This exact wording and behavior are copied
+   * from `dsh-bash-local`'s own README, verbatim (also present in
+   * `README.zh.md` and `lib/index.js`):
+   *   /opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-local/README.md
+   *   "merges offset-based stdout/stderr reads into one consuming delta,
+   *   placing stderr under a `[stderr]` marker when present."
+   * Not invented here — don't re-derive a different format later.
    */
   delta: string
   lossy: boolean
@@ -133,8 +157,46 @@ export interface ShellProcessLike {
 export const DEFAULTS = {
   /** Foreground timeout when a request doesn't specify one. */
   timeoutMs: 120_000,
+  /**
+   * Floor a resolved `timeoutMs` is clamped to (see `resolveSpec`). `0` and
+   * negative values are refused rather than passed through as-is: `0 ??
+   * DEFAULTS.timeoutMs` keeps `0` (nullish coalescing only replaces
+   * `null`/`undefined`), and `execRemote()` feeds `timeoutMs` straight to
+   * `setTimeout()`, so `0`/negative would fire the deadline immediately —
+   * indistinguishable from a real timeout in the returned `ShellRunResult`.
+   */
+  minTimeoutMs: 1,
+  /**
+   * Ceiling a resolved `timeoutMs` is clamped to — `setTimeout`'s maximum
+   * valid delay (2^31 - 1 ms, ~24.8 days; see `NO_BACKGROUND_TIMEOUT_MS`).
+   * Review finding (measured, not theoretical): an unclamped `timeoutMs`
+   * of 3,000,000,000 overflows `setTimeout`'s signed 32-bit argument and
+   * Node fires it after ~1ms instead of ~35 days — a command with a 1.5s
+   * runtime got killed in 10ms and reported as `timedOut: true`, with
+   * nothing in the result distinguishing it from a real timeout. This
+   * exact overflow was already documented below to justify
+   * `NO_BACKGROUND_TIMEOUT_MS` for the background path; this cap closes
+   * the matching gap on the foreground path, which is the one the model
+   * actually reaches through `dsh-tool-bash`'s `timeoutMs` parameter.
+   */
+  maxTimeoutMs: 2_147_483_647,
   /** Foreground stdout capture budget when a request doesn't specify one. */
   stdoutMaxBytes: 256 * 1024,
+  /**
+   * Floor/ceiling a resolved `stdoutMaxBytes` is clamped to. The floor is
+   * deliberately `1`, not some "sane minimum" like a few KB — a caller
+   * that resolves e.g. `stdoutMaxBytes: 100` to parse a small, known-shape
+   * stdout is a legitimate, real use case (dsh-shell's own doc comment on
+   * `ShellExecRequest.stdoutMaxBytes` names exactly this: "Trusted
+   * in-process consumers use this when they must parse complete stdout up
+   * to their own bounded limit"), and clamping it up to a "safer" floor
+   * would silently defeat that. The ceiling exists only to stop an
+   * absurd/accidental value (a caller passing bytes when they meant KB, or
+   * `Number.MAX_SAFE_INTEGER`) from asking `Buffer.concat()` to hold
+   * gigabytes.
+   */
+  minStdoutMaxBytes: 1,
+  maxStdoutMaxBytes: 1024 * 1024 * 1024,
   /** Remote workdir when neither the request nor the machine specifies one. */
   workdir: '~',
   /**
@@ -146,24 +208,39 @@ export const DEFAULTS = {
    * a naive `pending += chunk` accumulator is an OOM on a command that
    * produces gigabytes between two `readOutput()` calls. This is the cap
    * this executor applies on top, independent of the caller's foreground
-   * budget.
+   * budget. Injectable per-instance via `SshShellExecutorOptions` (a
+   * mobile profile will want to shrink it) — this is only the default.
    */
   liveBufferMaxBytes: 256 * 1024,
 } as const
 
 /**
- * `setTimeout`'s maximum valid delay (2^31 - 1 ms, ~24.8 days) — beyond it,
- * Node fires the timer immediately due to signed 32-bit overflow (verified,
- * documented Node behavior). `execRemote()` requires a numeric `timeoutMs`;
- * dsh's contract for `start()` is that "no timeout applies to background
- * processes" (see `dsh-shell`'s `ShellExecutor` doc comment), so this value
- * is the practical stand-in for "no timeout" for any realistic background
- * job while keeping `execRemote()`'s channel-open watchdog logic intact.
+ * `execRemote()` requires a numeric `timeoutMs`; dsh's contract for
+ * `start()` is that "no timeout applies to background processes" (see
+ * `dsh-shell`'s `ShellExecutor` doc comment), so `DEFAULTS.maxTimeoutMs`
+ * (itself `setTimeout`'s maximum valid delay) is the practical stand-in for
+ * "no timeout" for any realistic background job while keeping
+ * `execRemote()`'s channel-open watchdog logic intact. Same numeric value
+ * as `resolveSpec`'s foreground cap, same underlying reason — deliberately
+ * not two separate magic numbers.
  */
-const NO_BACKGROUND_TIMEOUT_MS = 2_147_483_647
+const NO_BACKGROUND_TIMEOUT_MS = DEFAULTS.maxTimeoutMs
 
-/** Source: `dsh-bash-local`'s package description — see `ShellProcessReadLike.delta`'s doc comment. */
+/** Source: `dsh-bash-local`'s README.md (see `ShellProcessReadLike.delta`'s doc comment for the exact path/quote). */
 const STDERR_MARKER = '\n[stderr]\n'
+
+/**
+ * Clamp `value` into `[min, max]`. `NaN` (a malformed request field) falls
+ * back to `min` rather than propagating — `Math.max(NaN, min)` and
+ * `Math.min(NaN, max)` both evaluate to `NaN`, so an un-guarded clamp would
+ * let a `NaN` through unclamped, defeating the whole point. `Infinity`
+ * needs no special case: `Math.min(Math.max(Infinity, min), max) === max`
+ * falls out of the two `Math` calls on its own.
+ */
+function clamp(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min
+  return Math.min(Math.max(value, min), max)
+}
 
 /**
  * Resolve a caller request into a fully-specified spec. Standalone function
@@ -181,8 +258,21 @@ export function resolveSpec(request: ExecRequestLike, machine: RemoteMachine): E
   return {
     command: request.command,
     workdir: request.workdir ?? machine.defaultWorkdir ?? DEFAULTS.workdir,
-    timeoutMs: request.timeoutMs ?? DEFAULTS.timeoutMs,
-    stdoutMaxBytes: request.stdoutMaxBytes ?? DEFAULTS.stdoutMaxBytes,
+    // C1 (review): dsh's own doc comments mandate this cap in two places —
+    // `ShellExecRequest.timeoutMs` is "Timeout override in milliseconds
+    // (implementations cap it)", and `ShellExecutor.resolve()` is "Apply
+    // implementation-owned defaults AND CAPS to a request". `?? DEFAULTS...`
+    // alone only fills an absent field; it lets `0`, a negative value, or
+    // an overflow-inducing value (e.g. 3_000_000_000, see
+    // DEFAULTS.maxTimeoutMs's doc comment) straight through to
+    // `execRemote()`'s `setTimeout()` call unmodified. Clamping here is
+    // what "cap" actually means in dsh's contract.
+    timeoutMs: clamp(request.timeoutMs ?? DEFAULTS.timeoutMs, DEFAULTS.minTimeoutMs, DEFAULTS.maxTimeoutMs),
+    stdoutMaxBytes: clamp(
+      request.stdoutMaxBytes ?? DEFAULTS.stdoutMaxBytes,
+      DEFAULTS.minStdoutMaxBytes,
+      DEFAULTS.maxStdoutMaxBytes,
+    ),
     signal: request.signal,
     stdin: request.stdin,
     env: request.env,
@@ -240,10 +330,17 @@ class LiveWindow {
     const lossy = this.lossy
     this.chunks = []
     this.windowBytes = 0
-    // Deliberately NOT resetting `this.lossy` here: once a window has lost
-    // data (overflow or a disconnect), that fact stays true about the
-    // stream forever — a later read reporting `lossy: false` would wrongly
-    // imply the earlier gap had been resolved.
+    // I1 (review): DOES reset `this.lossy` here — a previous version of
+    // this comment argued the opposite ("stays true about the stream
+    // forever") and was wrong. dsh's own `ShellProcessRead` doc comment
+    // defines `lossy` per-READ, not per-stream: "One incremental
+    // `readOutput` read"; `lossy` is "True when truncation dropped unread
+    // bytes THE DELTA cannot include". A second `readOutput()` call after
+    // an earlier overflow has genuinely lost nothing NEW — there is
+    // nothing left to report as missing from ITS delta — so leaving the
+    // flag stuck at `true` forever is a permanent false positive on every
+    // later read of an otherwise-healthy long-running background job.
+    this.lossy = false
     return { text, lossy }
   }
 }
@@ -270,6 +367,13 @@ function toRunResultLike(result: RemoteExecResult, timeoutMs: number): RunResult
 export interface SshShellExecutorOptions {
   pool: SshConnectionPool
   machine: RemoteMachine
+  /**
+   * Overrides `DEFAULTS.liveBufferMaxBytes` for this instance's `start()`
+   * live-read buffer (see `LiveWindow`). Made injectable per I5 (review): a
+   * mobile profile — memory-constrained, on a battery — will want a
+   * smaller live-buffer bound than the default without forking this class.
+   */
+  liveBufferMaxBytes?: number
 }
 
 /**
@@ -302,10 +406,12 @@ export interface SshShellExecutorOptions {
 export class SshShellExecutor {
   private readonly pool: SshConnectionPool
   private readonly machine: RemoteMachine
+  private readonly liveBufferMaxBytes: number
 
   constructor(options: SshShellExecutorOptions) {
     this.pool = options.pool
     this.machine = options.machine
+    this.liveBufferMaxBytes = options.liveBufferMaxBytes ?? DEFAULTS.liveBufferMaxBytes
   }
 
   /**
@@ -364,7 +470,16 @@ export class SshShellExecutor {
     const result = await execRemote(client, {
       command: spec.command,
       timeoutMs: spec.timeoutMs,
+      // I3 (review): `stdoutMaxBytes` is deliberately the ONLY one of the
+      // two taken from `spec` here. dsh-shell's own doc comment on
+      // `ShellExecSpec.stdoutMaxBytes` is explicit: "run() uses it for
+      // stdout; background jobs and stderr keep the executor's own output
+      // cap" — a caller resolving a small `stdoutMaxBytes` to parse a known
+      // stdout shape must not have that same small budget silently applied
+      // to stderr too, or an error message that needed the full budget
+      // gets truncated as a side effect nobody asked for.
       stdoutMaxBytes: spec.stdoutMaxBytes,
+      stderrMaxBytes: DEFAULTS.stdoutMaxBytes,
       workdir: spec.workdir,
       env: spec.env,
       stdin: spec.stdin,
@@ -388,7 +503,7 @@ export class SshShellExecutor {
    * read is for.
    */
   start(spec: ExecSpecLike): ShellProcessLike {
-    return new SshShellProcess(this.pool, this.machine, spec)
+    return new SshShellProcess(this.pool, this.machine, spec, this.liveBufferMaxBytes)
   }
 }
 
@@ -398,12 +513,14 @@ class SshShellProcess implements ShellProcessLike {
   signal: NodeJS.Signals | null = null
   readonly done: Promise<void>
 
-  private readonly stdoutWindow = new LiveWindow(DEFAULTS.liveBufferMaxBytes)
-  private readonly stderrWindow = new LiveWindow(DEFAULTS.liveBufferMaxBytes)
+  private readonly stdoutWindow: LiveWindow
+  private readonly stderrWindow: LiveWindow
   private readonly controller = new AbortController()
   private resolveDone!: () => void
 
-  constructor(pool: SshConnectionPool, machine: RemoteMachine, spec: ExecSpecLike) {
+  constructor(pool: SshConnectionPool, machine: RemoteMachine, spec: ExecSpecLike, liveBufferMaxBytes: number) {
+    this.stdoutWindow = new LiveWindow(liveBufferMaxBytes)
+    this.stderrWindow = new LiveWindow(liveBufferMaxBytes)
     this.done = new Promise((resolve) => {
       this.resolveDone = resolve
     })
@@ -422,7 +539,21 @@ class SshShellProcess implements ShellProcessLike {
       const result = await execRemote(client, {
         command: spec.command,
         timeoutMs: NO_BACKGROUND_TIMEOUT_MS,
-        stdoutMaxBytes: spec.stdoutMaxBytes,
+        // I3 (review): background jobs "keep the executor's own output
+        // cap" per dsh-shell's doc comment on `ShellExecSpec.stdoutMaxBytes`
+        // — NEITHER stream uses `spec.stdoutMaxBytes` here, unlike run()'s
+        // stdout. `spec.stdoutMaxBytes` is a foreground-only override; a
+        // background job has no foreground caller waiting to receive a
+        // capped result the way run() does, so there is no "this caller
+        // asked for a small budget" signal to honor for either stream.
+        // (Separately, and unaffected by this: `this.stdoutWindow`/
+        // `stderrWindow` — fed by `onData` below — are what `readOutput()`
+        // actually serves, bounded by `liveBufferMaxBytes`, not by
+        // anything passed here; this only bounds `execRemote()`'s own
+        // internal, currently-unused-by-us `RemoteExecResult.stdout`/
+        // `stderr` accumulation.)
+        stdoutMaxBytes: DEFAULTS.stdoutMaxBytes,
+        stderrMaxBytes: DEFAULTS.stdoutMaxBytes,
         workdir: spec.workdir,
         env: spec.env,
         stdin: spec.stdin,
@@ -480,6 +611,29 @@ class SshShellProcess implements ShellProcessLike {
     return { delta, lossy: stdout.lossy || stderr.lossy }
   }
 
+  /**
+   * ## `kill()` is best-effort SSH-channel teardown, NOT process-group termination
+   *
+   * dsh's contract for `ShellProcess.kill()` is "Kill the process **group**".
+   * This implementation cannot deliver that: `this.controller.abort()`
+   * drives `execRemote()`'s abort path, which calls `stream.close()` on the
+   * SSH exec channel — that tears down the CHANNEL, not the remote command.
+   * For a plain (non-PTY) `exec` channel, OpenSSH does not reliably reap the
+   * process on the other end, and is documented to ignore the SSH protocol's
+   * own `signal` request in this mode. A command that forked (`make -j8`,
+   * a backgrounded daemon, anything with children) can keep running on the
+   * remote host indefinitely after this returns — while `status` flips to
+   * `'killed'`, `exitCode` reads `null`, and `kill()` itself returns `true`,
+   * all of which look exactly like a real, successful kill from the caller's
+   * side. This is the same category of problem as claiming a `sandbox` this
+   * executor doesn't provide (see the class-level doc comment above) —
+   * claiming a constraint that doesn't actually hold — except here the
+   * type system gives no field to just omit; the closest available honest
+   * signal is this doc comment. Task 7's approval/UI copy should say
+   * something like "connection closed" rather than "process killed" when
+   * this path fires, since the user will otherwise believe the remote
+   * command actually stopped.
+   */
   kill(): boolean {
     if (this.status !== 'running') return false
     this.controller.abort()

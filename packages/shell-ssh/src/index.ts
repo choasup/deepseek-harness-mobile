@@ -432,8 +432,25 @@ class SshShellProcess implements ShellProcessLike {
       this.signal = null
       const message = isSshError(err) ? err.message : err instanceof Error ? err.message : String(err)
       this.stderrWindow.push(`[ssh] connection lost: ${message}\n`)
-      this.stdoutWindow.markLossy()
-      this.stderrWindow.markLossy()
+      // Only claim data loss when the command genuinely had a chance to
+      // produce some. `SshError.started` is `true` only when the command
+      // actually reached the remote and began running (see errors.ts) — a
+      // mid-command disconnect. Both `false` (execRemote confirmed the
+      // command never reached the server) and `undefined` (a pool-level
+      // failure — handshake, auth, fingerprint mismatch — "unrelated to
+      // whether the command started", per errors.ts's own doc comment, and
+      // in every one of those cases the command in fact never started)
+      // mean nothing was ever produced to lose. Marking `lossy` in either
+      // case would overclaim exactly the kind of false constraint point 3
+      // warns against (there for `sandbox`, but the same principle
+      // applies). A non-SshError is an unexpected/unclassified failure —
+      // safer to assume something may be missing than to assert
+      // completeness — so it marks lossy.
+      const genuinelyLossy = !isSshError(err) || err.started === true
+      if (genuinelyLossy) {
+        this.stdoutWindow.markLossy()
+        this.stderrWindow.markLossy()
+      }
     } finally {
       this.resolveDone()
     }

@@ -167,6 +167,22 @@ describe('SshShellExecutor#start', () => {
     expect(proc.kill()).toBe(false)
   })
 
+  it('目标机器从一开始就不可达：进程变成 killed，但不谎称丢失了从未产生过的数据', async () => {
+    pool = newPool()
+    const executor = new SshShellExecutor({ pool, machine: machineFor(1) })
+    const spec = executor.resolve({ command: 'echo hi' })
+    const proc = executor.start(spec)
+
+    await proc.done
+    expect(proc.status).toBe('killed')
+    expect(proc.exitCode).toBeNull()
+    const read = proc.readOutput()
+    // 命令从未真正送达过远端（pool.acquire() 直接失败）——没有任何输出可言,
+    // 不该被标记 lossy。stderr 里仍然带着连接失败的诊断信息。
+    expect(read.lossy).toBe(false)
+    expect(read.delta).toContain('connection lost')
+  })
+
   it('命令执行期间断线：进程变成 killed，读取结果标记 lossy', async () => {
     sshd = await startFakeSshd({
       commands: { [wrapped('slow')]: { stdout: 'partial', delayMs: 5000, writeBeforeDelay: true } },

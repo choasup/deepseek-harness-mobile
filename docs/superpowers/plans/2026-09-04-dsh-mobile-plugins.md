@@ -2548,6 +2548,14 @@ git commit -m "feat(remote-registry): cordis 插件入口"
 
 ## Task 11: 打包构建（tsdown）
 
+**入口形状的约束（Task 10 复审提出）**：`remote-registry` 的 `src/index.ts`
+一度既是纯类型/函数 barrel、又带上了 cordis 接线的**加载期副作用**和对
+`zod` / `dsh-storage-domain` / `dsh-credentials` 的**值导入**。而 `shell-ssh`
+只是为了拿两个类型守卫就 import 了这个 barrel，它的 `package.json` 里
+**这三个依赖一个都没声明**——目前只靠 pnpm 提升才解析得到。
+接线已挪进 `src/plugin.ts`，barrel 保持纯净。本任务配置 tsdown 时要保持这个分离：
+**消费者只为取一个类型守卫，不应被迫解析整个存储栈。**
+
 **动手前必读**：dsh 加载的是**编译后的 `lib/*.js`，不是 `.ts`**。这一点在写计划时被漏掉了，
 是实施中查证 ADP 参考插件才发现的——它的 `main` 是 `lib/index.js`，`files` 只含 `lib`，
 并且有 `prepare` 脚本在 install/link 时跑 tsdown。前面几个任务把 `main` 指向 `src/index.ts`，
@@ -2890,6 +2898,20 @@ git commit -m "feat(mobile-app): mobile profile 补丁，禁用本地进程依�
 ---
 
 ## Task 13: 端到端组合验证
+
+> **一个必须先验证的风险（Task 10 复审提出）**：单元测试用的是直接
+> `ctx.plugin()` 挂载，而真实 dsh 走的是 **Loader**，后者把每个条目挂进
+> **隔离组（isolate groups）**。`ctx.provide('remotes', ...)` 在一个组里注册的服务，
+> **对另一个组里的 shell-ssh 条目可能不可见**。
+>
+> 这是"两个插件各自都能工作，装到一起却互相看不见"的典型形态，而且
+> **只有走 Loader 才会暴露**——直接 `ctx.plugin()` 的测试永远绿。
+>
+> 所以本任务的第一步不是跑 `--dump-config`，而是**先用 `cordis-plugin-loader`
+> 起一个装配测试**，确认 `shell-ssh` 的插件真的能拿到 `ctx.remotes`。
+> 若拿不到，需要的是 `inject` 声明或分组配置上的调整，而不是改代码逻辑。
+
+
 
 前 11 个任务各自成立，但没验证过它们在真的 dsh 里能装起来。
 

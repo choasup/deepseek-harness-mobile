@@ -10,9 +10,12 @@
 // 本质是个序列化问题——只有真的走一遍"写 json 文件 -> 重新打开读反序列化"
 // 才测得出来；纯内存 Map 双份引用永远测不出这类 bug。
 //
-// Task 7 会复用这个夹具（在同一个 ctx 上再插 shell-ssh 的插件），所以
-// bootRemoteRegistry 之外把 Storage/json 后端/domain 表单这几步也各自导出，
-// 方便 Task 7 只借用底层存储栈、自己接别的插件。
+// cordis 接线在 ../../src/plugin.ts（不是 index.ts barrel）——见 index.ts
+// 顶部注释与 Task 10 复审 I2。这里直接从 plugin.ts 拿 name/inject/apply。
+//
+// Task 7 会复用这个夹具（在同一个 ctx 上再插 shell-ssh 的插件）。
+// `bootStorageStack()` 单独导出，正是为了让 Task 7 能只借用底层存储栈、
+// 自己接别的插件，不必话再重新装配一遍 Storage/json 后端/domain 表单。
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as jsonBackend from '@deepseek-ai/dsh-storage-json'
@@ -27,19 +30,28 @@ import {
   type CredentialRef,
   type ResolvedCredential,
 } from '@deepseek-ai/dsh-credentials'
-import * as remoteRegistry from '../../src/index.ts'
+import * as remoteRegistryPlugin from '../../src/plugin.ts'
 
 /**
- * 内存凭据替身。`shadowRef()` 是测试专用的控制口：模拟"这个引用被启动 dsh
- * 的 shell 继承的环境变量遮蔽、只读"——真实的 dsh-credentials-local 读的是
- * 进程环境变量，测试没法直接摆布它；这个替身让测试直接把某个 ref 标成
- * 被遮蔽，从而能覆盖 Task 8 交接项 1（`unset` 在遮蔽存在时拒绝写入）的路径。
- * `set`/`unset` 在被遮蔽时也真的抛错，与 dsh-credentials-local 的
- * `assertUnshadowed` 行为对齐，而不是只在 `describe()` 上做样子。
+ * 内存凭据替身。两个测试专用的控制口，分别模拟 dsh-credentials-local 里两种
+ * "这个引用其实不是你能改的"的只读层：
+ *
+ * - `shadowRef(ref, value)`：模拟 `env` 层——启动 dsh 的 shell 继承的进程
+ *   环境变量。真实实现里 `describe()` 对这种引用会报 `writable: false`，
+ *   `set`/`unset` 都会在写之前就拒绝（`assertUnshadowed`）。
+ * - `dotenvRef(ref, value)`：模拟 `project-env`/`user-env` 兜底层——dotenv
+ *   文件供的值。真实实现里 `describe()` 对这种引用照样报 `writable: true`
+ *   （这一层"看起来"能写），`unset()` 也不会报错，但它只会去清管理态存储
+ *   自己的文件，对 dotenv 层完全无效——`unset()` 之后再 `describe()` 一次，
+ *   这个 ref 依然 `configured: true`。这正是 Task 10 复审 C1 指出的那条
+ *   "适配层以为清空了、其实什么都没清掉"的路径，也是本文件存在的原因之一：
+ *   真实的本地 provider 读的是进程环境和磁盘上的 .env 文件，测试没法直接
+ *   摆布；这个替身把两种层都暴露成显式的方法调用。
  */
 export class MemoryCredentials extends CredentialProvider {
   private readonly values = new Map<string, string>()
   private readonly shadow = new Map<string, string>()
+  private readonly dotenv = new Map<string, string>()
   private readonly records = new Map<string, CredentialRecord>()
 
   /** 测试专用：把 ref 标成被只读环境变量遮蔽，遮蔽值为 value。 */
@@ -47,18 +59,31 @@ export class MemoryCredentials extends CredentialProvider {
     this.shadow.set(ref, value)
   }
 
+  /**
+   * 测试专用：把 ref 标成由 dotenv 兜底层供值——`describe()` 报
+   * `writable: true`，但 `unset()` 清不掉它（对齐 dsh-credentials-local
+   * 的 `dotenvFallback` 语义：它只在 `resolve`/`describe` 里参与读，从不
+   * 出现在 `write()` 触碰的路径上）。
+   */
+  dotenvRef(ref: string, value: string): void {
+    this.dotenv.set(ref, value)
+  }
+
   async resolve(ref: CredentialRef): Promise<ResolvedCredential | undefined> {
     const shadowed = this.shadow.get(ref)
     if (shadowed !== undefined) return { value: shadowed, source: 'env' }
     const value = this.values.get(ref)
-    if (value === undefined || value.length === 0) return undefined
-    return { value, source: 'memory' }
+    if (value !== undefined && value.length > 0) return { value, source: 'memory' }
+    const fromDotenv = this.dotenv.get(ref)
+    if (fromDotenv !== undefined) return { value: fromDotenv, source: 'project-env' }
+    return undefined
   }
 
   async describe(ref: CredentialRef): Promise<CredentialInfo> {
     if (this.shadow.has(ref)) return { configured: true, source: 'env', writable: false }
     const value = this.values.get(ref)
     if (value !== undefined && value.length > 0) return { configured: true, source: 'memory', writable: true }
+    if (this.dotenv.has(ref)) return { configured: true, source: 'project-env', writable: true }
     return { configured: false, writable: true }
   }
 
@@ -75,6 +100,8 @@ export class MemoryCredentials extends CredentialProvider {
     if (this.shadow.has(ref)) {
       throw new Error(`memory-credentials: "${ref}" 当前被只读环境变量遮蔽；请在启动 dsh 的 shell 里 unset ${ref} 后重试`)
     }
+    // 故意不碰 this.dotenv——真实的 dsh-credentials-local 的 unset() 只
+    // write() 管理态那份文件，对 dotenv 兜底层没有任何效力，这里如实复现。
     this.values.delete(ref)
     this.notifyUpdated(ref)
   }
@@ -113,6 +140,38 @@ export class MemoryCredentials extends CredentialProvider {
   }
 }
 
+export interface StorageStack {
+  ctx: Context
+  /** 按挂载的反序依次 dispose 这三个插件（storage-domain → json 后端 → storage 中枢）。 */
+  dispose(): Promise<void>
+}
+
+/**
+ * 起一个真的 cordis Context，挂上 dsh 的存储三层栈：`Storage` 中枢 +
+ * `dsh-storage-json`（json 文件后端，指向 root 目录）+ `dsh-storage-domain`
+ * （路由到 json 后端）。不挂凭据、不挂本包插件——单独导出正是为了让 Task 7
+ * 能只借用这一段，自己在上面接别的东西（比如 shell-ssh 的插件），也能拿到
+ * 一个真正拆得干净的 dispose()，而不必重新猜怎么拆这三层。
+ */
+export async function bootStorageStack(root: string): Promise<StorageStack> {
+  const ctx = new Context()
+  const storageFiber = ctx.plugin(Storage)
+  await storageFiber
+  const jsonFiber = ctx.plugin(jsonBackend, { root })
+  await jsonFiber
+  const domainFiber = ctx.plugin(storageDomain, { backend: 'json' })
+  await domainFiber
+
+  return {
+    ctx,
+    async dispose() {
+      await domainFiber.dispose()
+      await jsonFiber.dispose()
+      await storageFiber.dispose()
+    },
+  }
+}
+
 export interface RemoteRegistryHarness {
   ctx: Context
   creds: MemoryCredentials
@@ -125,7 +184,18 @@ export interface RemoteRegistryHarness {
    * 落盘持久化了"，而不是"只是同一个内存 Map 还没被回收"。
    */
   remount(): Promise<void>
-  dispose(): Promise<void>
+  /** 只 dispose 本包这一个插件的 fiber；storage 三层栈和凭据替身仍然挂着。 */
+  disposeRegistry(): Promise<void>
+  /**
+   * 完整拆掉这次 boot 挂的全部五个插件：remote-registry → 凭据替身 →
+   * storage-domain → json 后端 → storage 中枢，严格按挂载的反序逐个
+   * dispose。`disposeRegistry()` 只拆最上面那一个，今天够用是因为下面几层
+   * 都没有需要主动释放的外部资源；Task 7 会在同一个 ctx 上再插 ssh2 连接，
+   * 那时候"只拆 remote-registry、底下全留着"就不再是良性的了，所以这里把
+   * 两种 dispose 都准备好、含义也分开命名，而不是只给一个语义模糊的
+   * dispose()。
+   */
+  disposeAll(): Promise<void>
 }
 
 /**
@@ -133,14 +203,14 @@ export interface RemoteRegistryHarness {
  * 目录）、内存凭据替身，再挂上本包的 cordis 插件。
  */
 export async function bootRemoteRegistry(root: string): Promise<RemoteRegistryHarness> {
-  const ctx = new Context()
-  await ctx.plugin(Storage)
-  await ctx.plugin(jsonBackend, { root })
-  await ctx.plugin(storageDomain, { backend: 'json' })
-  await ctx.plugin(MemoryCredentials)
+  const stack = await bootStorageStack(root)
+  const { ctx } = stack
 
-  let fiber = ctx.plugin(remoteRegistry)
-  await fiber
+  const credsFiber = ctx.plugin(MemoryCredentials)
+  await credsFiber
+
+  let registryFiber = ctx.plugin(remoteRegistryPlugin)
+  await registryFiber
 
   const creds = ctx.credentials as MemoryCredentials
 
@@ -149,12 +219,18 @@ export async function bootRemoteRegistry(root: string): Promise<RemoteRegistryHa
     creds,
     root,
     async remount() {
-      await fiber.dispose()
-      fiber = ctx.plugin(remoteRegistry)
-      await fiber
+      await registryFiber.dispose()
+      registryFiber = ctx.plugin(remoteRegistryPlugin)
+      await registryFiber
     },
-    async dispose() {
-      await fiber.dispose()
+    async disposeRegistry() {
+      await registryFiber.dispose()
+    },
+    async disposeAll() {
+      // 反序：先拆最上层（依赖别人的），再拆底层（被依赖的）。
+      await registryFiber.dispose()
+      await credsFiber.dispose()
+      await stack.dispose()
     },
   }
 }

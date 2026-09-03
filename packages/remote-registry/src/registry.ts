@@ -122,11 +122,20 @@ export class RemoteRegistry {
    * 孤儿密钥（见 remove() 的注释），要么——到了 Task 10，凭据来自
    * `CredentialProvider.resolve`，它的数据源里包含裸的进程环境变量
    * （env/file/project-env/user-env 这一叠）——单纯是主机上恰好导出了
-   * 一个叫 `REMOTE_KEY_GPU_H20` 的环境变量，跟这个注册表毫无关系。两种
-   * 情况都会导致：起一台新机器、从没调用过 setPrivateKey，credentialsFor()
-   * 却安静地返回了不属于这台机器的私钥。加了这行 deleteSecret 之后，
-   * 新机器的 keyRef 槽位保证是空的，credentialsFor() 会照实抛
-   * MissingCredentialError，而不是冒充"已配置"。
+   * 一个叫 `REMOTE_KEY_GPU_H20` 的环境变量或在某个 `.env` 里配了同名项，
+   * 跟这个注册表毫无关系。
+   *
+   * 这行 deleteSecret 试图清空这个槽位，但**只能清管理态存储自己那一层**
+   * ——`env`（启动 dsh 的 shell 里继承的进程环境变量）和 `project-env`/
+   * `user-env`（dotenv 兜底层）都清不掉，它们不受这次写入影响。Task 10
+   * 的适配层因此在这两种"清不干净"的情况下都改为**抛出**而不是假装清空
+   * 成功（`env` 层：`describe().writable` 为 false，写之前就能拦住；
+   * dotenv 兜底层更隐蔽——`describe()` 照样报 `writable: true`，`unset()`
+   * 也不会报错，只有清完之后再 `describe()` 一次、发现它依然
+   * `configured: true` 才能揭穿）。也就是说：起一台新机器时若 keyRef 撞上
+   * 了这类槽位，`add()` 会跟着失败并指出真正供值的那一层，而不是悄悄让
+   * `credentialsFor()` 在从没调用过 `setPrivateKey()` 的情况下返回一把
+   * 不属于这台机器的私钥。
    *
    * 原子性：这里现在是"读 listMachines 判重 -> 写 deleteSecret 清槽 ->
    * 写 putMachine"，中间没有事务，也没有锁。这不只是"两个并发 add()

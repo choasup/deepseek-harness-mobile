@@ -2071,9 +2071,31 @@ export class RemoteRegistry {
 }
 ```
 
-`remove` 用 `writeSecret(ref, '')` 表达「抹掉密钥」而不是新增一个删除方法——
-`RegistryStore` 因此只需四个方法，接进 dsh 的 credentials 服务时适配更简单。
-Step 1 的测试夹具已按这个语义实现（空值即删除）。
+`remove` 用真正的 `deleteSecret(ref)`，**不要**用 `writeSecret(ref, '')` 表达删除
+——dsh 的 `CredentialProvider.set` **拒绝空值**（文档明写 "use `unset`"），
+那套约定既与上面的六方法接口自相矛盾，也根本实现不了。
+
+**删除顺序：先密钥，后机器记录。** 反序更糟：若 `deleteMachine` 先成功而
+`deleteSecret` 失败，`get(name)` 立刻返回 undefined，`remove()` 再也无法通过
+公开 API 重试清理那个孤立密钥；而后来添加的另一台机器若碰巧推导出同一个
+`keyRef`，会在它的主人调用 `setPrivateKey` 之前就**静默继承那把陈旧密钥**。
+
+**但仅靠删除顺序不够。** 真正要守的不变量是"任何机器记录都不得继承一把
+不是它自己写入的密钥"，而它还有两条被违反的路径（复审实测复现）：
+
+1. `add()` 只检查**机器记录**的 keyRef 碰撞，不看密钥槽。槽里有孤立密钥时，
+   新机器直接继承。
+2. 到 Task 10 更严重：`CredentialProvider.resolve` 是**分层的**，源包括 `env`。
+   在一台恰好导出了 `REMOTE_KEY_GPU_H20` 的机器上把新机器命名为 `gpu-h20`，
+   它就静默获得一把私钥——根本不需要有人先 remove 过什么。
+
+所以 `add()` 必须在 `putMachine` 前先 `deleteSecret(machine.keyRef)`：
+新机器按定义没有密钥，槽里的任何东西都属于别人。
+
+**"单一写者"在单进程内就不成立。** `remove(X)` 与 `setPrivateKey(X)` 交错即可
+造出孤立密钥——类里每个"读后写"都跨越 `await`，而 Task 7 的 cordis 适配层与
+设置界面同时驱动同一个实例是寻常的异步交错。`KvTable.update(key, fn)` 提供了
+真正的原子读改写，是将来收紧这里的正确工具。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -2310,6 +2332,18 @@ git commit -m "feat(remote-registry): 分层连接探针"
 - Modify: `packages/remote-registry/src/index.ts`（在既有 barrel 上追加接线）
 - Create: `packages/remote-registry/tests/mock/harness.ts`（cordis 启动夹具，Task 7 也用）
 - Test: `packages/remote-registry/tests/composition/plugin.test.ts`
+
+**Task 8 交接过来的三件事**：
+
+1. `CredentialProvider.unset` **在只读源遮蔽该引用时会拒绝**。删除顺序是先密钥，
+   所以遮蔽存在时 `remove()` 会在 `deleteMachine` 之前抛出——**用户会得到一台
+   删不掉的机器**。这是安全优先于可用性的正确取舍，但适配层必须把它映射成
+   明确的错误信息，不能原样上抛。
+2. 适配层**不得返回缓存对象的引用**。`get()`/`list()` 目前会把存储里的对象原样
+   交出去，调用方的改动会写穿——`KvTable` 每次读反序列化的话没问题，但带缓存的
+   实现会中招。
+3. `MissingCredentialError` 已映射为 `SSH_NO_CREDENTIAL`（不再压扁成
+   `SSH_AUTH_FAILED`），适配层保持这个区分。
 
 **不要只测导出面。** 参考 ADP 插件的 `tests/mock/harness.ts`：起一个真的
 `Context`，挂 `Loader` 与测试替身（`CredentialProvider` 的内存实现、

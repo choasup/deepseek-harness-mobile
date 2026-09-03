@@ -60,6 +60,13 @@ export interface FakeSshd {
    */
   errors: Error[]
   close(): Promise<void>
+  /**
+   * 挂断所有当前连接，但服务器继续监听同一个端口——用来测试"同一个
+   * host:port:user 断线后重新 acquire 应该连到同一把 key、拿到新连接"这条
+   * 路径，而不必（也无法）重启一台监听在新端口上的服务器。close() 会真的
+   * 停止监听，这个方法不会。
+   */
+  disconnectAll(): void
 }
 
 /** 起一台进程内假 sshd，监听 127.0.0.1 的随机端口。 */
@@ -177,6 +184,9 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
     received,
     authAttempts,
     errors,
+    disconnectAll: () => {
+      for (const conn of openConnections) conn.end()
+    },
     close: () =>
       new Promise<void>((resolve) => {
         // 显式断开还挂着的连接，否则 server.close() 只停止接受新连接，

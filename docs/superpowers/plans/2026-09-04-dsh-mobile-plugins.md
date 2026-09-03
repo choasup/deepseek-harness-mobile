@@ -52,7 +52,22 @@ export class SshShellExecutor extends ShellExecutor {
 **凡是要装进 dsh 运行的 `src/` 代码，验证时必须用真的 `node` 子进程，不能只看 vitest。**
 （探针文件要放在使用该依赖的包目录内——pnpm 严格布局下，裸标识符从 workspace 根解析不到。）
 
-**5. 类型定义在本机可读。** 写代码前先读这两个文件，它们是唯一权威：
+**5. dsh 的全部源码在本机可读，路径要写清楚。** 项目自己的 `node_modules` 里**没有**
+dsh 的包（它们是 peerDependencies，由宿主提供），所以在仓库里 grep 是找不到的——
+Task 6 的复审就因此误判我的一处引证是"无法验证"。参考实现在全局安装下：
+
+```
+/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<包名>/
+```
+
+每个包都带 `README.md`、`README.zh.md`、`lib/*.js`（编译后的实现）和
+`lib/types/*.d.ts`。**引用契约时要写出确切文件路径**，"包描述里说"这种说法
+下一个人复现不了。
+
+另外：`.d.ts` 说的是"类型上允许什么"，`lib/*.js` 说的是"运行时实际发生什么"。
+对"这个字段会不会被读"这类问题，两者给出的答案经常不同——要读后者。
+
+**6. 类型定义在本机可读。** 写代码前先读这两个文件，它们是唯一权威：
 - `…/@deepseek-ai/dsh-shell/lib/types/types.d.ts` — `ShellExecRequest` / `ShellExecSpec` / `ShellRunResult` / `ShellProcess`
 - `…/@deepseek-ai/dsh-shell/lib/types/index.d.ts` — `ShellExecutor` 抽象类
 
@@ -1296,6 +1311,34 @@ git commit -m "feat(shell-ssh): 远程执行、输出截断、超时与取消"
 `undefined`，所以那个键**根本不会出现在请求里**。Task 7 填 `undefined` 正是
 `dsh-tool-bash` 本来就会产生的值，下游没有任何地方读它或对它抛错。
 
+**`resolve()` 的职责是"默认值**和**上限"，不只是默认值。** dsh 在两处明说：
+`ShellExecRequest.timeoutMs` 是 *"Timeout override in milliseconds (implementations cap it)"*，
+`resolve()` 是 *"Apply implementation-owned defaults **and caps** to a request"*。
+只用 `??` 兜底会出这种事：
+
+```
+timeoutMs = 3_000_000_000
+→ TimeoutOverflowWarning: does not fit into a 32-bit signed integer.
+  Timeout duration was set to 1.
+→ 一条要跑 1.5 秒的命令在 10ms 后被杀，报告 timedOut: true
+```
+
+跟真实超时**没有任何可区分之处**。`timeoutMs: 0` 与负数同理（`0 ?? default` 保留 0）。
+必须 clamp 到 `[1, 2_147_483_647]`。
+
+**`kill()` 杀不掉远程进程，必须说出来。** dsh 的契约写的是 *"Kill the process group"*，
+而我们能做的只是关掉 SSH channel。非 PTY 的 exec channel 下 OpenSSH 不可靠地回收
+远程命令（且它出了名地忽略 SSH 的 signal 请求），所以 `make -j8` 会在远程继续跑，
+而本地 `status` 已经翻成 `'killed'`、`kill()` 返回 `true`。
+
+这跟 sandbox 那条是同一类问题——**声称一个做不到的约束**。至少要在 `kill()` 上写明
+它是尽力而为的通道拆除，远程进程可能存活；Task 7 的审批文案也要如实说。
+
+**`stdoutMaxBytes` 只管前台 stdout。** 原文：*"`run()` uses it for stdout;
+**background jobs and stderr keep the executor's own output cap**."* 直接透传会让
+一个想解析小段 stdout 而把上限设成 100 字节的调用方，**把它需要的 stderr 错误信息
+也截断到 100 字节**。stderr 与后台任务要用执行器自己的上限。
+
 **机器名不要塞进 stderr。** 每条命令都加前缀，会让**本来 stderr 为空的成功命令
 变成"有 stderr 输出"**——下游（包括模型自己）把空 stderr 当作"干净运行"的判断
 就全被污染了。机器名属于**说一次**的常驻上下文，归 Task 7 通过 system prompt /
@@ -1583,6 +1626,18 @@ git commit -m "feat(shell-ssh): SshShellExecutor，实现 resolve/run/start"
 ---
 
 ## Task 7: cordis 适配层
+
+**Task 6 交接过来的三件事**：
+
+1. `run()` 在连接丢失时 reject，而 `SshError` 上带着 `partialStdout` / `partialStderr`
+   ——Task 5 特意收集的"断线前已输出的 200 行"。**适配层要把它们渲染出来**，
+   否则这份 payload 在 `run()` 边界就丢了，用户只看到一句 `err.message`。
+2. `dshEnv` 会被**静默丢弃**：它不在 `ExecRequestLike` 里，而结构化类型允许多余属性，
+   所以 Task 7 的 `resolve()` 编译得过却丢掉了受管的 `DSH_*` 快照。
+   这跟 `sandboxPolicy` 不同——后者是必填字段，编译器会拦住。
+3. `sandboxPolicy` 填 `undefined` 即可（Task 6 已查证其对本执行器惰性）。
+
+
 
 **Files:**
 - Create: `packages/shell-ssh/src/plugin.ts`

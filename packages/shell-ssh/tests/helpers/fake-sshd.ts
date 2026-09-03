@@ -13,9 +13,28 @@ const { Server } = ssh2
 export interface FakeCommandResult {
   stdout?: string
   stderr?: string
+  /**
+   * 按数组元素依次多次调用 stream.write()，而不是一次性把 stdout 整段写出去
+   * ——用来测试一个多字节字符被拆到两个不同的 'data' 事件里时，客户端有没有
+   * 正确重组（不产生乱码）。数组元素既可以是字符串也可以是 Buffer；测试里
+   * 故意按单字节切分时必须用 Buffer——单个延续字节单独拿去当字符串
+   * write()，Node 会按 UTF-8 重新编码它，那本身就会产生乱码，混进了跟
+   * "客户端重组"无关的噪声。设置了这个字段就忽略 stdout。
+   */
+  stdoutChunks?: Array<string | Buffer>
+  /** stderr 版本的 stdoutChunks，语义相同。 */
+  stderrChunks?: Array<string | Buffer>
   exitCode?: number
   /** 写完输出后等这么久再关闭 channel，用来测超时与取消。 */
   delayMs?: number
+  /**
+   * 配合 delayMs 使用：为 true 时输出在 exec 一开始就立刻写出去，只有
+   * exit-status + 关闭 channel 才等 delayMs；默认（false/未设置）是输出和
+   * exit/关闭一起等 delayMs 之后才发生。用来测试"断线发生前已经收到过一部分
+   * 输出"这种场景——不设置这个字段的话，delayMs 期间连接被挂断时客户端什么
+   * 都没收到过，测不出"断线前收集到的部分输出有没有被正确保留"这件事。
+   */
+  writeBeforeDelay?: boolean
   /** 不返回 exit-status，而是报告被信号杀死。 */
   killedBy?: string
 }
@@ -128,15 +147,30 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
           received.push(info.command)
           const result = options.commands?.[info.command] ?? { exitCode: 127, stderr: 'command not found\n' }
           const stream = acceptExec()
-          const finish = () => {
-            if (result.stdout) stream.write(result.stdout)
-            if (result.stderr) stream.stderr.write(result.stderr)
+          const writeOutput = () => {
+            if (result.stdoutChunks) for (const piece of result.stdoutChunks) stream.write(piece)
+            else if (result.stdout) stream.write(result.stdout)
+            if (result.stderrChunks) for (const piece of result.stderrChunks) stream.stderr.write(piece)
+            else if (result.stderr) stream.stderr.write(result.stderr)
+          }
+          const finishExit = () => {
             if (result.killedBy) stream.exit(result.killedBy)
             else stream.exit(result.exitCode ?? 0)
             stream.end()
           }
-          if (result.delayMs) setTimeout(finish, result.delayMs)
-          else finish()
+          if (result.delayMs) {
+            // writeBeforeDelay：输出立刻发出去，只有 exit-status/关闭 channel
+            // 才真的等 delayMs——用来模拟"已经收到过一部分输出，之后连接才
+            // 断开"，而不是"断线时什么都还没收到"。
+            if (result.writeBeforeDelay) writeOutput()
+            setTimeout(() => {
+              if (!result.writeBeforeDelay) writeOutput()
+              finishExit()
+            }, result.delayMs)
+          } else {
+            writeOutput()
+            finishExit()
+          }
         })
       })
     })

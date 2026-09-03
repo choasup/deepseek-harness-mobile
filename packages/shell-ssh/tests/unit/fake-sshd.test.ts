@@ -1,3 +1,4 @@
+import { createConnection } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 // ssh2 是 CommonJS，具名导入在真实 Node ESM 下会抛 SyntaxError；vitest 的
 // esbuild 转译会掩盖这一点（参见 fake-sshd.ts 顶部注释），这里同样改成默认
@@ -41,13 +42,31 @@ describe('startFakeSshd', () => {
     expect((await execOnce(sshd.port, 'nope')).code).toBe(127)
   })
 
-  it('记录真实的认证方法，证明凭据确实被送达而不是靠 none 探测蒙混过关', async () => {
+  it('记录真实认证尝试的密码，证明凭据确实被送达而不是被 none 探测蒙混过关', async () => {
     sshd = await startFakeSshd()
     await execOnce(sshd.port, 'echo hi')
-    // 'none' 探测总是先发一次且总被拒绝；紧接着必须有一次 method 是 'password'
-    // 的真实尝试，且带着我们连接时用的用户名——这就是连接池确实把凭据交给了
-    // ssh2、而不是被 'none' 探测蒙混过关的证据。
+    // 'none' 探测总是先发一次且总被拒绝；紧接着必须有一次 method 是
+    // 'password'、且带着我们连接时实际用的密码的真实尝试——这才是连接池
+    // 确实把 SshCredentials 交给了 ssh2 的证据，而不只是"某次密码尝试发生过"。
     expect(sshd.authAttempts.some((a) => a.method === 'none')).toBe(true)
-    expect(sshd.authAttempts).toContainEqual({ method: 'password', username: 'tester' })
+    expect(sshd.authAttempts).toContainEqual({ method: 'password', username: 'tester', password: 'x' })
+  })
+
+  it('close() 在还有一个未完成 SSH 握手的裸 TCP 连接时也能及时返回', async () => {
+    sshd = await startFakeSshd()
+    // 只建立 TCP 连接、不发送任何数据——ssh2 在这种情况下不会触发它自己的
+    // 'connection' 事件，openConnections 看不到这个 socket，只有底层
+    // net.Server 知道它的存在。这正是 I1 要修的那类"半握手"连接。
+    const socket = createConnection({ host: '127.0.0.1', port: sshd.port })
+    await new Promise<void>((resolve, reject) => {
+      socket.on('connect', () => resolve())
+      socket.on('error', reject)
+    })
+
+    const start = Date.now()
+    await sshd.close()
+    expect(Date.now() - start).toBeLessThan(4000)
+
+    socket.destroy()
   })
 })

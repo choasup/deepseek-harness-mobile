@@ -188,7 +188,7 @@ git commit -m "chore: pnpm workspace 骨架"
 
 - [ ] **Step 1: 建包**
 
-`packages/remote-registry/package.json`:
+`packages/remote-registry/package.json`（`main`/`exports` 在 Task 11 会改指向 `lib/`）:
 ```json
 {
   "name": "@dsh-mobile/remote-registry",
@@ -196,9 +196,6 @@ git commit -m "chore: pnpm workspace 骨架"
   "type": "module",
   "main": "src/index.ts",
   "exports": { ".": "./src/index.ts" },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
-  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-credentials": "^0.1.1-rc.2"
@@ -354,8 +351,11 @@ export function parseRemoteUrl(input: string): RemoteMachine {
     throw new RemoteUrlError(`机器名不合法: ${name}（只允许字母数字与 . _ -，且须字母数字开头）`, 'BAD_NAME')
   }
 
-  const port = url.port ? Number(url.port) : 22
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  // 注意：WHATWG URL 对越界端口是在 new URL() 里就抛，根本走不到这里。
+  // 越界的情况须在上面的 catch 块里用正则识别（实测结论，见下方说明）。
+  // 这里仍然必要——端口 0 不会让 new URL() 抛，只能在这一层拦下。
+  const port = url.port ? Number(url.port) : DEFAULT_SSH_PORT
+  if (!Number.isInteger(port) || port < 1 || port > MAX_PORT) {
     throw new RemoteUrlError(`端口越界: ${url.port}`, 'BAD_PORT')
   }
 
@@ -393,6 +393,16 @@ Run: `pnpm vitest run packages/remote-registry/tests/unit/url.test.ts`
 Expected: PASS，12 个用例全绿
 
 如果 `formatRemoteUrl` 的往返测试失败，多半是 `URL` 对 `searchParams` 的编码与手写期望不一致——以 `parseRemoteUrl(formatRemoteUrl(m))` 的结果为准，不要去改期望值里的编码细节。
+
+**上面的参考实现在 `BAD_PORT` 一项上是错的**（实施时实测发现）：WHATWG `new URL()`
+对 `1..65535` 之外的端口在**构造时就抛**，所以函数体里的范围检查永远等不到越界值。
+须在 `catch` 块里用锚定的正则 `...:(\d+)(?:[/?#]|$)` 识别出越界端口并报 `BAD_PORT`，
+其余才落到 `BAD_URL`。函数体里的范围检查仍要保留——端口 `0` 不会让 `new URL()` 抛，
+只能在那一层拦下，这也是它没有变成死代码的原因。
+
+同样要注意 `formatRemoteUrl`：WHATWG 的 `port` setter 对非法值是**静默 no-op**，
+不抛异常。所以越界端口会被悄悄丢掉，格式化出的 URL 解析回来变成 22。
+两个方向都要走同一个 `assertValidMachine`。
 
 - [ ] **Step 7: Commit**
 
@@ -1492,7 +1502,9 @@ git commit -m "feat(shell-ssh): cordis 适配层，把远程执行接到 ctx.she
 `packages/remote-registry/tests/unit/registry.test.ts`:
 ```ts
 import { beforeEach, describe, expect, it } from 'vitest'
-import { RemoteRegistry, DuplicateMachineError, UnknownMachineError } from '../../src/registry.ts'
+import {
+  RemoteRegistry, DuplicateMachineError, DuplicateKeyRefError, UnknownMachineError,
+} from '../../src/registry.ts'
 import type { RemoteMachine } from '../../src/types.ts'
 
 function makeStore() {
@@ -1538,6 +1550,15 @@ describe('RemoteRegistry', () => {
     await expect(registry.add(gpu)).rejects.toBeInstanceOf(DuplicateMachineError)
   })
 
+  it('不同名字但 keyRef 相同时抛 DuplicateKeyRefError', async () => {
+    // keyRefForName 把 - 和 _ 都折成 _，所以这两个名字撞同一个凭据条目。
+    // 放任的话，remove 掉一台会抹掉另一台的私钥。
+    await registry.add({ ...gpu, name: 'my-box', keyRef: 'REMOTE_KEY_MY_BOX' })
+    await expect(
+      registry.add({ ...gpu, name: 'my_box', keyRef: 'REMOTE_KEY_MY_BOX' }),
+    ).rejects.toBeInstanceOf(DuplicateKeyRefError)
+  })
+
   it('list 返回全部，按名字排序', async () => {
     await registry.add({ ...gpu, name: 'zeta', keyRef: 'REMOTE_KEY_ZETA' })
     await registry.add({ ...gpu, name: 'alpha', keyRef: 'REMOTE_KEY_ALPHA' })
@@ -1575,6 +1596,11 @@ describe('RemoteRegistry', () => {
     expect(await registry.credentialsFor(gpu)).toEqual({ privateKey: 'KEY-MATERIAL' })
   })
 
+  it('add 会归一化：大小写不同的 host 不会变成两条记录', async () => {
+    await registry.add({ ...gpu, host: 'H.Test' })
+    expect((await registry.get('gpu-h20'))?.host).toBe('h.test')
+  })
+
   it('importUrl 从 dsh-remote:// 导入', async () => {
     const machine = await registry.importUrl('dsh-remote://root@h.test:11020/?name=gpu-h20&tags=gpu,cuda')
     expect(machine.name).toBe('gpu-h20')
@@ -1598,7 +1624,7 @@ Expected: FAIL —— 无法解析 `../../src/registry.ts`
 
 `packages/remote-registry/src/registry.ts`:
 ```ts
-import { parseRemoteUrl } from './url.ts'
+import { normalizeMachine, parseRemoteUrl } from './url.ts'
 import type { RemoteMachine } from './types.ts'
 
 export class DuplicateMachineError extends Error {
@@ -1612,6 +1638,19 @@ export class UnknownMachineError extends Error {
   constructor(name: string) {
     super(`机器 '${name}' 不存在`)
     this.name = 'UnknownMachineError'
+  }
+}
+
+/**
+ * 两个不同的机器名可能推导出同一个 keyRef（`keyRefForName` 把 `-` `.` `_`
+ * 都折成 `_`，如 `my-box` 与 `my_box`）。机器按 name 唯一，但密钥按 keyRef
+ * 存——若放任碰撞，删掉一台会连带抹掉另一台的私钥。唯一性由注册表负责，
+ * 不改 keyRefForName 的推导规则。
+ */
+export class DuplicateKeyRefError extends Error {
+  constructor(name: string, conflictsWith: string, keyRef: string) {
+    super(`机器 '${name}' 与已有的 '${conflictsWith}' 推导出同一个凭据引用名 ${keyRef}，请换一个名字`)
+    this.name = 'DuplicateKeyRefError'
   }
 }
 
@@ -1654,9 +1693,18 @@ export class RemoteRegistry {
     return (await this.list()).filter((machine) => machine.tags.includes(tag))
   }
 
-  async add(machine: RemoteMachine): Promise<void> {
+  /**
+   * 存进来的机器一律先过 normalizeMachine。手工录入表单不经过 parseRemoteUrl，
+   * 若不归一化，`H.Test` 与 `h.test`、`SHA256:` 与 `sha256:` 会变成两条记录
+   * ——这正是 url.ts 里花了几轮才关掉的那个 bug，只是搬到了注册表这一层。
+   * normalizeMachine 同时负责校验，非法机器在这里就被拒。
+   */
+  async add(input: RemoteMachine): Promise<void> {
+    const machine = normalizeMachine(input)
     const machines = await this.all()
     if (machines[machine.name]) throw new DuplicateMachineError(machine.name)
+    const clash = Object.values(machines).find((m) => m.keyRef === machine.keyRef)
+    if (clash) throw new DuplicateKeyRefError(machine.name, clash.name, machine.keyRef)
     machines[machine.name] = machine
     await this.store.write(MACHINES_KEY, machines)
   }
@@ -1704,7 +1752,7 @@ Step 1 的测试夹具已按这个语义实现（空值即删除）。
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/remote-registry/tests/unit/registry.test.ts`
-Expected: PASS，11 个用例
+Expected: PASS，13 个用例
 
 - [ ] **Step 5: Commit**
 
@@ -1767,6 +1815,15 @@ describe('probeMachine', () => {
     expect(report.stages.slice(1).every((s) => s.skipped)).toBe(true)
   })
 
+  it('已固定 sha256: 而握手返回 SHA256: 时视为匹配', async () => {
+    // ssh-keygen 打印大写；两边归一化后不应报不匹配。
+    const pinned = { ...machine, hostFingerprint: 'sha256:abc' }
+    const report = await probeMachine(pinned, deps({
+      sshHandshake: async () => ({ ok: true, fingerprint: 'SHA256:abc' }),
+    }))
+    expect(report.stages.find((s) => s.stage === 'handshake')!.ok).toBe(true)
+  })
+
   it('指纹与已固定值不符时握手阶段失败', async () => {
     const pinned = { ...machine, hostFingerprint: 'sha256:OLD' }
     const report = await probeMachine(pinned, deps())
@@ -1804,6 +1861,7 @@ Expected: FAIL —— 无法解析 `../../src/probe.ts`
 
 `packages/remote-registry/src/probe.ts`:
 ```ts
+import { normalizeFingerprint } from './url.ts'
 import type { RemoteMachine } from './types.ts'
 
 export const PROBE_STAGES = ['tcp', 'handshake', 'os', 'gpu'] as const
@@ -1859,11 +1917,17 @@ export async function probeMachine(machine: RemoteMachine, deps: ProbeDeps): Pro
     stages.push({ stage: 'handshake', ok: false, detail: `SSH 握手失败：${handshake.error ?? '未知原因'}` })
     return skipRest(2)
   }
-  if (machine.hostFingerprint && handshake.fingerprint !== machine.hostFingerprint) {
+  // 两边都要过 normalizeFingerprint 再比。ssh-keygen -lf 打印的是大写 `SHA256:`，
+  // 而手工录入的机器不经过 parseRemoteUrl，会原样保留大写——不归一化就会对
+  // 一台完全正常的机器误报"指纹不匹配"。假警报会训练用户无视 pin 警告，
+  // 比不报还糟。
+  const pinned = machine.hostFingerprint ? normalizeFingerprint(machine.hostFingerprint) : undefined
+  const seen = handshake.fingerprint ? normalizeFingerprint(handshake.fingerprint) : undefined
+  if (pinned && seen !== pinned) {
     stages.push({
       stage: 'handshake',
       ok: false,
-      detail: `主机指纹不匹配：已固定 ${machine.hostFingerprint}，实际 ${handshake.fingerprint}`,
+      detail: `主机指纹不匹配：已固定 ${pinned}，实际 ${seen}`,
     })
     return skipRest(2)
   }
@@ -1896,7 +1960,7 @@ GPU 阶段永远 `ok: true`——没有 GPU 不是配置错误，只是一条信
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/remote-registry/tests/unit/probe.test.ts`
-Expected: PASS，5 个用例
+Expected: PASS，6 个用例
 
 - [ ] **Step 5: Commit**
 
@@ -1949,7 +2013,7 @@ import { RemoteRegistry, type RegistryStore } from './registry.ts'
 
 export type { RemoteMachine } from './types.ts'
 export {
-  parseRemoteUrl, formatRemoteUrl, keyRefForName,
+  parseRemoteUrl, formatRemoteUrl, keyRefForName, normalizeFingerprint, normalizeMachine,
   RemoteUrlError, REMOTE_URL_SCHEME, type RemoteUrlErrorCode,
 } from './url.ts'
 export {
@@ -2001,7 +2065,170 @@ git commit -m "feat(remote-registry): cordis 插件入口"
 
 ---
 
-## Task 11: `mobile-app` bundle
+## Task 11: 打包构建（tsdown）
+
+**动手前必读**：dsh 加载的是**编译后的 `lib/*.js`，不是 `.ts`**。这一点在写计划时被漏掉了，
+是实施中查证 ADP 参考插件才发现的——它的 `main` 是 `lib/index.js`，`files` 只含 `lib`，
+并且有 `prepare` 脚本在 install/link 时跑 tsdown。前面几个任务把 `main` 指向 `src/index.ts`，
+那样在 Task 13 把包 link 进真 dsh profile 时会加载失败。
+
+本任务补上构建，让两个源码包能被 dsh 真正加载。测试仍然直接 import `src/*.ts`
+（迭代快、不必每次构建），只有对外的入口指向 `lib/`。
+
+**Files:**
+- Modify: `package.json`（根，加 tsdown devDependency）
+- Create: `packages/remote-registry/tsdown.config.ts`
+- Create: `packages/shell-ssh/tsdown.config.ts`
+- Modify: `packages/remote-registry/package.json`
+- Modify: `packages/shell-ssh/package.json`
+- Test: `packages/remote-registry/tests/built/loadable.test.ts`
+
+- [ ] **Step 1: 写失败的测试**
+
+这个测试验证的正是 dsh 会做的事：用**普通 Node ESM import** 加载构建产物。
+它必须绕开 vitest 的 esbuild 转译，否则测不出真实加载行为——这也是上一轮 review
+里参数属性那个坑能瞒过测试套件的原因。
+
+`packages/remote-registry/tests/built/loadable.test.ts`:
+```ts
+import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it } from 'vitest'
+
+const pkgRoot = fileURLToPath(new URL('../../', import.meta.url))
+
+describe('构建产物', () => {
+  it('lib/index.js 存在', () => {
+    expect(existsSync(`${pkgRoot}lib/index.js`)).toBe(true)
+  })
+
+  it('能被普通 Node ESM 加载（dsh 就是这么加载的）', () => {
+    // 关键：走真的 node 子进程，不经过 vitest 的 esbuild 转译。
+    const script = `
+      const m = await import(${JSON.stringify(`${pkgRoot}lib/index.js`)})
+      const machine = m.parseRemoteUrl('dsh-remote://me@h.test/?name=box')
+      if (machine.name !== 'box') throw new Error('parse 结果不对: ' + machine.name)
+      if (typeof m.RemoteRegistry !== 'function') throw new Error('缺少 RemoteRegistry')
+      console.log('OK')
+    `
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8',
+    })
+    expect(out.trim()).toBe('OK')
+  })
+})
+```
+
+把 `tests/built/**` 加进根 `vitest.config.ts` 的 `include`（现有 glob
+`packages/*/tests/**/*.test.ts` 已经覆盖，无需改动——确认一下即可）。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `pnpm vitest run packages/remote-registry/tests/built`
+Expected: FAIL —— `lib/index.js` 不存在
+
+- [ ] **Step 3: 装 tsdown**
+
+在根 `package.json` 的 `devDependencies` 加 `"tsdown": "^0.15.0"`，然后 `pnpm install`。
+
+（这台机器上 `pnpm install` 可能跑 2–6 分钟并打印 ECONNRESET 重试，属正常，见 Task 1。）
+
+- [ ] **Step 4: 写构建配置**
+
+`packages/remote-registry/tsdown.config.ts`:
+```ts
+import { defineConfig } from 'tsdown'
+
+export default defineConfig({
+  entry: { index: 'src/index.ts' },
+  outDir: 'lib',
+  format: ['esm'],
+  platform: 'node',
+  target: 'es2024',
+  dts: true,
+  clean: true,
+  sourcemap: true,
+  // dsh 的包由宿主提供，不打进产物
+  external: [/^@deepseek-ai\//],
+})
+```
+
+`packages/shell-ssh/tsdown.config.ts`:
+```ts
+import { defineConfig } from 'tsdown'
+
+export default defineConfig({
+  entry: { index: 'src/index.ts' },
+  outDir: 'lib',
+  format: ['esm'],
+  platform: 'node',
+  target: 'es2024',
+  dts: true,
+  clean: true,
+  sourcemap: true,
+  // dsh 的包由宿主提供；ssh2 与同 workspace 的包保持外部依赖
+  external: [/^@deepseek-ai\//, 'ssh2', '@dsh-mobile/remote-registry'],
+})
+```
+
+- [ ] **Step 5: 改两个包的入口**
+
+`packages/remote-registry/package.json` 中，把
+```json
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+```
+改成
+```json
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "scripts": {
+    "build": "tsdown",
+    "prepare": "tsdown"
+  },
+```
+
+`packages/shell-ssh/package.json` 做同样的改动（`main` / `types` / `exports` / `files` / `scripts` 五项）。
+
+`prepare` 是关键：`pnpm link` 与 git 安装都会触发它，Task 13 把包 link 进
+dsh profile 时才有 `lib/` 可加载。
+
+- [ ] **Step 6: 构建并确认测试通过**
+
+Run: `pnpm -r build`
+Expected: 两个包各产出 `lib/index.js`、`lib/index.d.ts`、`lib/index.js.map`
+
+Run: `pnpm vitest run packages/remote-registry/tests/built`
+Expected: PASS，2 个用例
+
+Run: `pnpm test`
+Expected: 全部通过（既有的 `src/*.ts` 单测不受影响）
+
+若第二个用例报 `SyntaxError`，说明源码里有不可擦除的 TypeScript 语法漏网。
+根 `tsconfig.json` 的 `erasableSyntaxOnly` 应该已经在 typecheck 阶段拦住了；
+先跑 `pnpm typecheck` 确认。
+
+- [ ] **Step 7: 忽略构建产物**
+
+在 `.gitignore` 追加 `lib/`。
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add package.json packages/*/package.json packages/*/tsdown.config.ts \
+        packages/remote-registry/tests/built .gitignore pnpm-lock.yaml
+git commit -m "build: tsdown 构建，入口指向 lib/ 以便 dsh 加载"
+```
+
+---
+
+## Task 12: `mobile-app` bundle
 
 **Files:**
 - Create: `packages/mobile-app/package.json`
@@ -2167,7 +2394,7 @@ git commit -m "feat(mobile-app): mobile profile 补丁，禁用本地进程依�
 
 ---
 
-## Task 12: 端到端组合验证
+## Task 13: 端到端组合验证
 
 前 11 个任务各自成立，但没验证过它们在真的 dsh 里能装起来。
 
@@ -2285,6 +2512,7 @@ git commit -m "test: mobile profile 组合验证与 jitless 全量回归"
 ## 完成标准
 
 - `pnpm test` 与 `pnpm test:jitless` 均全绿，`pnpm typecheck` 无错
+- `pnpm -r build` 成功，且构建产物能被普通 Node ESM 加载（dsh 的加载方式）
 - `dsh --profile mobile --dump-config` 能组合出树，且在 `--jitless` 下同样成立
 - 在桌面 dsh 上用 mobile profile 起一个会话，让它执行一条远程命令并拿到输出
 

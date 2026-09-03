@@ -2345,10 +2345,30 @@ git commit -m "feat(remote-registry): 分层连接探针"
 3. `MissingCredentialError` 已映射为 `SSH_NO_CREDENTIAL`（不再压扁成
    `SSH_AUTH_FAILED`），适配层保持这个区分。
 
-**不要只测导出面。** 参考 ADP 插件的 `tests/mock/harness.ts`：起一个真的
-`Context`，挂 `Loader` 与测试替身（`CredentialProvider` 的内存实现、
-`storageDomain` 的内存实现），再 `ctx.loader.create()` 加载本插件，
-断言 `ctx.remotes` 真的可用、增删查改真的落到存储上、密钥真的走 credentials。
+**不要只测导出面。** 起一个真的 `Context` 装配本插件，断言 `ctx.remotes` 真的可用、
+增删查改真的落到存储上、密钥真的走 credentials。
+
+**怎么拿到 dsh 的包来测**（查 ADP 插件确认的做法）：dsh 的包在 `peerDependencies` 里
+声明用于生产，**同时在 `devDependencies` 里**声明用于测试。本任务要加：
+
+```
+@deepseek-ai/cordis                 @deepseek-ai/dsh-storage
+@deepseek-ai/cordis-plugin-loader   @deepseek-ai/dsh-storage-json
+@deepseek-ai/dsh-credentials        @deepseek-ai/dsh-storage-domain
+```
+
+（这台机器上 `pnpm install` 要跑 2–6 分钟并打印 ECONNRESET 重试，属正常。）
+
+**存储栈是三层**：`dsh-storage`（hub，`ctx.storage.backend` 是后端注册表）
++ `dsh-storage-json`（JSON 文件 KV 后端）+ `dsh-storage-domain`
+（`ctx.storageDomain`，把域路由到后端，配置是 `{ backend, routes? }`）。
+测试里用真的 json 后端配一个临时目录，比写内存替身更有价值——它同时验证了
+序列化往返，而"适配层不得返回缓存对象引用"那条交接项正是序列化相关的。
+
+**凭据侧则相反，用内存替身。** ADP 自己写了个 `MemoryCredentials extends
+CredentialProvider`（见 `tests/mock/harness.ts`）而不是用 `dsh-credentials-local`。
+对我们尤其合适：探针的 credential 阶段要区分 `source: 'env'` 与 `'file'`，
+内存实现能让测试直接控制这个值，而真实的本地 provider 会去读进程环境。
 
 - [ ] **Step 1: 写失败的测试**
 

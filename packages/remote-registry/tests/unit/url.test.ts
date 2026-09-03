@@ -37,8 +37,13 @@ describe('parseRemoteUrl', () => {
       .toEqual(['a', 'b', 'c'])
   })
 
-  it('host 会被转成小写，避免与小写形式被当成两台不同机器', () => {
+  it('host 会被转成小写，避免与大写形式被当成两台不同机器', () => {
     expect(parseRemoteUrl('dsh-remote://me@ExAmple.COM/?name=box').host).toBe('example.com')
+  })
+
+  it('fp 前缀大小写不敏感，且会被归一化成小写（ssh-keygen -lf 打印的是大写 SHA256:）', () => {
+    const m = parseRemoteUrl('dsh-remote://me@h.test/?name=box&fp=SHA256%3AAbC%2B%2F123')
+    expect(m.hostFingerprint).toBe('sha256:AbC+/123')
   })
 
   it.each([
@@ -86,6 +91,14 @@ describe('formatRemoteUrl', () => {
     expect(url).toBe('dsh-remote://me@h.test/?name=box')
   })
 
+  it('host 会被归一化成小写再序列化——用户在表单里敲大写不该报错', () => {
+    const url = formatRemoteUrl({
+      name: 'box', host: 'Example.COM', port: 22, user: 'me',
+      keyRef: 'REMOTE_KEY_BOX', tags: [],
+    })
+    expect(url).toBe('dsh-remote://me@example.com/?name=box')
+  })
+
   it.each([
     [
       'port 越界（曾经会被 WHATWG 的 port setter 静默丢弃，序列化出端口 22 的 URL）',
@@ -98,14 +111,19 @@ describe('formatRemoteUrl', () => {
       'BAD_NAME',
     ],
     [
-      'tag 含逗号（否则往返时会被拆成两个 tag）',
-      { name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: ['a,b'] },
+      'user 为空（曾经会序列化成一个 parse 会拒绝的 URL，往返不是逆运算）',
+      { name: 'box', host: 'h.test', port: 22, user: '', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'MISSING_USER',
+    ],
+    [
+      'tags 不是数组（曾经会抛出未包装的 TypeError: not iterable）',
+      { name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: undefined },
       'BAD_TAG',
     ],
     [
-      'host 非法（曾经会抛出未包装的 TypeError）',
-      { name: 'box', host: 'h test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
-      'BAD_URL',
+      'tag 含逗号（否则往返时会被拆成两个 tag）',
+      { name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: ['a,b'] },
+      'BAD_TAG',
     ],
     [
       'fp 格式不对',
@@ -115,6 +133,40 @@ describe('formatRemoteUrl', () => {
       },
       'BAD_FINGERPRINT',
     ],
+    // 下面这一组都是「host 校验只看 new URL() 会不会抛」的漏洞：WHATWG
+    // 对 host 位置里的 '/', '?', '#', '@', ':' 不会抛错，而是悄悄把
+    // 字符串重新切分成别的部分。只有最后一条（含空格）会让 new URL()
+    // 真正抛错——这也是为什么之前只测这一条会给出错误的安全感。
+    [
+      'host 里混进了端口（会被当成端口 2222，而不是 host 的一部分）',
+      { name: 'box', host: 'h.test:2222', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 里混进了 scheme',
+      { name: 'box', host: 'ssh://h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 里混进了 userinfo',
+      { name: 'box', host: 'a@evil.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 里混进了路径',
+      { name: 'box', host: 'h.test/evil', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 为空串',
+      { name: 'box', host: '', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 含空格（唯一一种会让 new URL() 直接抛错的畸形 host）',
+      { name: 'box', host: 'h test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
   ])('拒绝：%s', (_label, machine, code) => {
     try {
       formatRemoteUrl(machine as RemoteMachine)
@@ -123,6 +175,47 @@ describe('formatRemoteUrl', () => {
       expect(err).toBeInstanceOf(RemoteUrlError)
       expect((err as RemoteUrlError).code).toBe(code)
     }
+  })
+
+  it.each([
+    [
+      '最简单的情况：默认端口、无 tags、无 fp',
+      { name: 'a', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_A', tags: [] } satisfies RemoteMachine,
+      { name: 'a', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_A', tags: [] } satisfies RemoteMachine,
+    ],
+    [
+      '大写 host + 非默认端口 + 多个 tags',
+      {
+        name: 'b', host: 'H.Test', port: 2222, user: 'root', keyRef: 'REMOTE_KEY_B', tags: ['x', 'y'],
+      } satisfies RemoteMachine,
+      {
+        name: 'b', host: 'h.test', port: 2222, user: 'root', keyRef: 'REMOTE_KEY_B', tags: ['x', 'y'],
+      } satisfies RemoteMachine,
+    ],
+    [
+      'IPv6 host + 大写 fp 前缀',
+      {
+        name: 'c', host: '[::1]', port: 22, user: 'me', keyRef: 'REMOTE_KEY_C', tags: ['gpu'],
+        hostFingerprint: 'SHA256:AbC+/123',
+      } satisfies RemoteMachine,
+      {
+        name: 'c', host: '[::1]', port: 22, user: 'me', keyRef: 'REMOTE_KEY_C', tags: ['gpu'],
+        hostFingerprint: 'sha256:AbC+/123',
+      } satisfies RemoteMachine,
+    ],
+    [
+      '端口取到上边界 + defaultWorkdir，无 tags',
+      {
+        name: 'd', host: 'gpu.example.com', port: 65535, user: 'me', keyRef: 'REMOTE_KEY_D', tags: [],
+        defaultWorkdir: '/root/work',
+      } satisfies RemoteMachine,
+      {
+        name: 'd', host: 'gpu.example.com', port: 65535, user: 'me', keyRef: 'REMOTE_KEY_D', tags: [],
+        defaultWorkdir: '/root/work',
+      } satisfies RemoteMachine,
+    ],
+  ])('批量往返：%s', (_label, input, expected) => {
+    expect(parseRemoteUrl(formatRemoteUrl(input))).toEqual(expected)
   })
 })
 

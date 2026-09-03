@@ -28,6 +28,18 @@
  * `sandboxPolicy: undefined` through untouched when it calls the real
  * `resolve()`/hands specs to this executor, and to merge `dshEnv` into
  * `env` (or extend `ExecSpecLike`) if a future task needs it.
+ *
+ * Verified this is inert, not just unread by this file: `dsh-shell`'s own
+ * `ShellExecutor` base class never reads `sandboxPolicy` at runtime (only
+ * in type declarations), and `dsh-tool-bash` gates ALL `sandboxPolicy`
+ * handling behind `ctx.shell.sandboxMode !== undefined` — it computes
+ * `sandboxPolicy = defaultMode === void 0 ? void 0 : ctx.get("sandboxPolicy")`
+ * and builds the request with `...policy !== void 0 ? { sandboxPolicy: policy } : {}`.
+ * Since this executor's `sandboxMode` returns `undefined`, `dsh-tool-bash`
+ * never even puts `sandboxPolicy` on the `ShellExecRequest` it builds for
+ * us — Task 7 setting `sandboxPolicy: undefined` on the resolved spec is
+ * exactly the value that would already be there; nothing downstream reads
+ * or throws on it.
  */
 import type { RemoteMachine } from '@dsh-mobile/remote-registry'
 import type { SshConnectionPool } from './connection.ts'
@@ -94,12 +106,13 @@ export type ShellProcessStatusLike = 'running' | 'completed' | 'killed'
 export interface ShellProcessReadLike {
   /**
    * Output produced since the previous read. Stdout and stderr deltas
-   * accumulated since the last read are concatenated, with a marker line
-   * ahead of any stderr content (see `STDERR_MARKER`) — dsh's own doc
-   * comment says only "stderr in a marked section" without specifying a
-   * format, so this is this executor's choice; Task 7 should double-check
-   * it against whatever the real `dsh-bash-local` marker looks like before
-   * relying on it for anything format-sensitive.
+   * accumulated since the last read are concatenated, with stderr placed
+   * under a `[stderr]` marker WHEN PRESENT (no marker at all when there is
+   * no stderr in this delta). This exact wording and behavior come from
+   * `dsh-bash-local`'s own package description: it "merges offset-based
+   * stdout/stderr reads into one consuming delta, placing stderr under a
+   * `[stderr]` marker when present" — not invented here, so don't
+   * re-derive a different format later.
    */
   delta: string
   lossy: boolean
@@ -149,7 +162,8 @@ export const DEFAULTS = {
  */
 const NO_BACKGROUND_TIMEOUT_MS = 2_147_483_647
 
-const STDERR_MARKER = '\n--- stderr ---\n'
+/** Source: `dsh-bash-local`'s package description — see `ShellProcessReadLike.delta`'s doc comment. */
+const STDERR_MARKER = '\n[stderr]\n'
 
 /**
  * Resolve a caller request into a fully-specified spec. Standalone function
@@ -241,7 +255,7 @@ function trimIncompleteUtf8Head(buf: Buffer<ArrayBuffer>): Buffer<ArrayBuffer> {
   return start === 0 ? buf : buf.subarray(start)
 }
 
-function toRunResultLike(result: RemoteExecResult, timeoutMs: number, stderrPrefix: string): RunResultLike {
+function toRunResultLike(result: RemoteExecResult, timeoutMs: number): RunResultLike {
   return {
     exitCode: result.exitCode,
     signal: result.signal,
@@ -249,16 +263,7 @@ function toRunResultLike(result: RemoteExecResult, timeoutMs: number, stderrPref
     aborted: result.aborted,
     timeoutMs,
     stdout: { text: result.stdout, truncated: result.stdoutTruncated },
-    // Machine identity annotation lives on stderr, not stdout: stdout is
-    // the command's own output and a model or downstream script may parse
-    // or pipe it, so it must stay pristine. stderr is already the
-    // "diagnostic" channel (dsh's own LocalBashExecutor puts spawn-failure
-    // messages there too), and — critically — it is a field `ShellRunResult`
-    // actually has room for. There is no `machine` field on the real
-    // `ShellRunResult`/`ShellProcess` types and this package must not
-    // invent one Task 7 would have to strip back out, so this is the one
-    // channel guaranteed to reach the model on every single call.
-    stderr: { text: `${stderrPrefix}${result.stderr}`, truncated: result.stderrTruncated },
+    stderr: { text: result.stderr, truncated: result.stderrTruncated },
   }
 }
 
@@ -272,17 +277,35 @@ export interface SshShellExecutorOptions {
  * the `resolve()`/`run()`/`start()` shape dsh's `ctx.shell` seam expects.
  * One instance targets one `RemoteMachine`; Task 7's cordis adapter is
  * expected to construct one per configured machine.
+ *
+ * ## The target machine name is NOT surfaced here — deliberately
+ *
+ * An earlier version of this class prepended a `[ssh:<name> user@host]`
+ * line to every `run()` result's stderr, reasoning that the model has no
+ * other way to learn which machine its commands ran on. That was wrong:
+ * `ShellRunResult.stderr.text` is real command output, and prepending to it
+ * means a successful command that wrote nothing to stderr now reports
+ * *non-empty* stderr on every single call — anything that treats empty
+ * stderr as "clean run" (the model's own reading included) is misled on
+ * every command, which is worse than the model not knowing the machine
+ * name. The machine name is genuine context, but it belongs stated ONCE,
+ * not stamped onto every command's output, and stderr is not the channel
+ * for standing context.
+ *
+ * This is Task 7's job instead: the cordis plugin composing this class
+ * knows the target machine at load time and can contribute it via
+ * `ctx.systemPrompt.section(...)` (the same mechanism `dsh-tool-bash` uses
+ * for its own standing tool guidance) or the tool description — wherever
+ * dsh puts standing context about what a tool does, once, rather than
+ * repeated on every call.
  */
 export class SshShellExecutor {
   private readonly pool: SshConnectionPool
   private readonly machine: RemoteMachine
-  /** Prepended to every result's/process's stderr — see `toRunResultLike()`. */
-  private readonly stderrPrefix: string
 
   constructor(options: SshShellExecutorOptions) {
     this.pool = options.pool
     this.machine = options.machine
-    this.stderrPrefix = `[ssh:${options.machine.name} ${options.machine.user}@${options.machine.host}]\n`
   }
 
   /**
@@ -347,7 +370,7 @@ export class SshShellExecutor {
       stdin: spec.stdin,
       signal: spec.signal,
     })
-    return toRunResultLike(result, spec.timeoutMs, this.stderrPrefix)
+    return toRunResultLike(result, spec.timeoutMs)
   }
 
   /**
@@ -365,7 +388,7 @@ export class SshShellExecutor {
    * read is for.
    */
   start(spec: ExecSpecLike): ShellProcessLike {
-    return new SshShellProcess(this.pool, this.machine, spec, this.stderrPrefix)
+    return new SshShellProcess(this.pool, this.machine, spec)
   }
 }
 
@@ -380,16 +403,10 @@ class SshShellProcess implements ShellProcessLike {
   private readonly controller = new AbortController()
   private resolveDone!: () => void
 
-  constructor(pool: SshConnectionPool, machine: RemoteMachine, spec: ExecSpecLike, stderrPrefix: string) {
+  constructor(pool: SshConnectionPool, machine: RemoteMachine, spec: ExecSpecLike) {
     this.done = new Promise((resolve) => {
       this.resolveDone = resolve
     })
-    // Seed stderr with the machine-identity annotation immediately, so the
-    // very first readOutput() already surfaces it — a background process
-    // may run for a long time before anyone reads its output, and the
-    // model should not have to wait for that to learn which machine it's
-    // running on.
-    this.stderrWindow.push(stderrPrefix)
 
     if (spec.signal) {
       if (spec.signal.aborted) this.controller.abort()

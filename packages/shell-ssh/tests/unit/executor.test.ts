@@ -84,10 +84,11 @@ describe('SshShellExecutor#run', () => {
     expect(result.aborted).toBe(false)
     expect(result.timeoutMs).toBe(DEFAULTS.timeoutMs)
     expect(result.stdout).toEqual({ text: 'out', truncated: false })
-    // stderr 带机器标注前缀（见 index.ts 的设计说明），原始内容仍完整保留。
-    expect(result.stderr.truncated).toBe(false)
-    expect(result.stderr.text).toContain('err')
-    expect(result.stderr.text).toContain('gpu-h20')
+    // stderr 是命令原始输出,不带任何本执行器自己加的标注(见 index.ts
+    // SshShellExecutor 类文档注释:目标机器名不通过 stderr 暴露——那样会让
+    // 一条本该 stderr 为空的成功命令看起来"有 stderr 输出",误导下游把
+    // 空 stderr 当作"干净执行"的判断)。
+    expect(result.stderr).toEqual({ text: 'err', truncated: false })
   })
 
   it('run() 不声称任何 sandbox 约束：结果里完全没有 sandbox 字段', async () => {

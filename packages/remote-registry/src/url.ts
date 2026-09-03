@@ -60,9 +60,14 @@ function isAsciiHost(host: string): boolean {
   }
 }
 
-/** 把指纹的前缀归一化成小写；base64 payload 大小写敏感，原样保留。 */
+/**
+ * 把指纹归一化成 ssh-keygen -lf 会打印的规范形式：前缀小写、去掉
+ * base64 的尾部 padding（`=`）。接受时宽松（padding 可有可无），
+ * 存储时严格（统一成不带 padding 的形式），否则一个存了带 padding
+ * 指纹的机器会在 Task 9 的握手比对里永远匹配不上。
+ */
 export function normalizeFingerprint(fp: string): string {
-  return fp.replace(/^sha256:/i, 'sha256:')
+  return fp.replace(/^sha256:/i, 'sha256:').replace(/=+$/, '')
 }
 
 /**
@@ -77,12 +82,14 @@ export function keyRefForName(name: string): string {
 }
 
 /**
- * 校验并归一化一台机器描述，返回一份新的、字段已规范化的副本。
- * parseRemoteUrl 与 formatRemoteUrl 都通过它——保证两者互为逆运算，
- * 也保证没有调用方能在字段被检查前就用到它（例如对 host 调用
- * `.toLowerCase()`）。
+ * 校验一台机器描述并返回规范化后的副本（host 大小写/IPv6 形式、fp
+ * 前缀与 padding 等都已归一化）。parseRemoteUrl 与 formatRemoteUrl
+ * 都通过它，两者互为逆运算；也是唯一的规范化入口——外部调用方
+ * （例如 Task 8 手动录入表单的 add()）应该用这个函数的返回值去存储，
+ * 而不是调用方自己传进来的原始对象，否则 formatRemoteUrl 序列化出的
+ * 是规范形式，但存进 registry 的还是 'H.Test' 这种未归一化的写法。
  */
-function normalizeAndValidate(machine: RemoteMachine): RemoteMachine {
+export function normalizeMachine(machine: RemoteMachine): RemoteMachine {
   if (typeof machine.user !== 'string' || !machine.user) {
     throw new RemoteUrlError('user 不能为空', 'MISSING_USER')
   }
@@ -114,6 +121,8 @@ function normalizeAndValidate(machine: RemoteMachine): RemoteMachine {
   if (!Array.isArray(machine.tags)) {
     throw new RemoteUrlError('tags 必须是字符串数组', 'BAD_TAG')
   }
+  // BAD_TAG 只可能从 format 方向抛出：parse 是把 tags 参数按逗号切开
+  // 来产生数组的，切出来的每一项天然不可能再包含逗号。
   for (const tag of machine.tags) {
     // 逗号是 tags 的分隔符，含逗号的 tag 在往返序列化时会被拆成两个。
     if (typeof tag !== 'string' || tag.includes(',')) {
@@ -137,6 +146,13 @@ function normalizeAndValidate(machine: RemoteMachine): RemoteMachine {
     // （不是 punycode），而且悄悄"成功"——必须在这里挡住。
     throw new RemoteUrlError(`host 含非 ASCII 字符: ${machine.host}（请提供 punycode 形式，如 xn--...）`, 'BAD_URL')
   }
+  // 一个裸 '@'（空 username、空 password，如 '@evil.test'）解析后
+  // probe.username 和 probe.password 都是空串，探测结果查不出任何
+  // 异常——WHATWG 把这个空 userinfo 分隔符原样丢弃，不留痕迹。host
+  // 语法本身不允许 '@'，在探测之前就直接拒绝。
+  if (machine.host.includes('@')) {
+    throw new RemoteUrlError(`host 不合法: ${machine.host}`, 'BAD_URL')
+  }
   // 先转小写再探测：普通域名的大小写折叠靠我们自己做（WHATWG 对
   // 非特殊 scheme 的 host 不会折叠大小写），IPv6 压缩等则靠探测结果。
   let probe: URL
@@ -145,10 +161,15 @@ function normalizeAndValidate(machine: RemoteMachine): RemoteMachine {
   } catch {
     throw new RemoteUrlError(`host 不合法: ${machine.host}`, 'BAD_URL')
   }
-  // 只看"抛没抛错"不够：WHATWG 对 host 位置里的 '/','?','#','@',':'
-  // 不抛错，而是把字符串悄悄重新切分成别的部分。这里正向断言探测
-  // 结果里除了 host 什么都没有，把 host 里混入的额外分隔符挡住。
-  if (probe.username || probe.port || probe.pathname !== '/' || probe.search || probe.hash) {
+  // 只看"抛没抛错"不够：WHATWG 对 host 位置里的 '/','?','#',':' 不
+  // 抛错，而是把字符串悄悄重新切分成别的部分。这里正向断言探测结果
+  // 里除了 host 什么都没有，把混入的额外分隔符挡住（password 也要
+  // 查——非空 password、空 username 的 userinfo，如 ':pw@evil.test'，
+  // 只看 username 会漏过去；'@' 本身已经在上面单独挡掉了）。
+  if (
+    probe.username || probe.password || probe.port
+    || probe.pathname !== '/' || probe.search || probe.hash
+  ) {
     throw new RemoteUrlError(`host 不合法: ${machine.host}`, 'BAD_URL')
   }
 
@@ -212,11 +233,11 @@ export function parseRemoteUrl(input: string): RemoteMachine {
   const workdir = url.searchParams.get('workdir')
   if (workdir) machine.defaultWorkdir = workdir
 
-  return normalizeAndValidate(machine)
+  return normalizeMachine(machine)
 }
 
 export function formatRemoteUrl(machine: RemoteMachine): string {
-  const normalized = normalizeAndValidate(machine)
+  const normalized = normalizeMachine(machine)
 
   const url = new URL(`${REMOTE_URL_SCHEME}//${normalized.host}/`)
   url.username = encodeURIComponent(normalized.user)

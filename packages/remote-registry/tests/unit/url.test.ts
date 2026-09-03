@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { RemoteMachine } from '../../src/types.ts'
 import {
-  formatRemoteUrl, keyRefForName, normalizeFingerprint, parseRemoteUrl, RemoteUrlError,
+  formatRemoteUrl, keyRefForName, normalizeFingerprint, normalizeMachine, parseRemoteUrl,
+  RemoteUrlError,
 } from '../../src/url.ts'
 
 describe('parseRemoteUrl', () => {
@@ -188,6 +189,23 @@ describe('formatRemoteUrl', () => {
       'BAD_URL',
     ],
     [
+      // 空 username、非空 password 的 userinfo——只查 probe.username
+      // 会漏过去，必须同时查 probe.password。
+      'host 里混进了 userinfo（空 username，只有 password）',
+      { name: 'box', host: ':pw@evil.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 里混进了 userinfo（username 和 password 都为空，只有 @）',
+      { name: 'box', host: '@evil.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
+      'host 里混进了 userinfo（双冒号写法）',
+      { name: 'box', host: '::pw@evil.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
+      'BAD_URL',
+    ],
+    [
       'host 里混进了路径',
       { name: 'box', host: 'h.test/evil', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [] },
       'BAD_URL',
@@ -297,9 +315,31 @@ describe('keyRefForName', () => {
   })
 })
 
+describe('normalizeMachine', () => {
+  it('导出给外部调用方用——例如 Task 8 手动录入表单在 add() 前应该存这个返回值，而不是原始输入', () => {
+    const m = normalizeMachine({
+      name: 'box', host: 'H.Test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [],
+      hostFingerprint: 'SHA256:AbC=',
+    })
+    expect(m).toEqual({
+      name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: [],
+      hostFingerprint: 'sha256:AbC',
+    })
+  })
+})
+
 describe('normalizeFingerprint', () => {
   it('只归一化前缀大小写，base64 payload 原样保留', () => {
     expect(normalizeFingerprint('SHA256:AbC+/123')).toBe('sha256:AbC+/123')
     expect(normalizeFingerprint('sha256:AbC+/123')).toBe('sha256:AbC+/123')
+  })
+
+  it('去掉 base64 的尾部 padding，与 ssh-keygen -lf 的输出对齐', () => {
+    // ssh-keygen -lf 打印不带 padding 的形式；其他工具可能带 padding。
+    // 两种写法必须归一化成同一个值，否则 Task 9 的握手比对会把一台
+    // 存了带 padding 指纹的机器永远判定为"指纹不匹配"。
+    expect(normalizeFingerprint('sha256:AbC=')).toBe('sha256:AbC')
+    expect(normalizeFingerprint('SHA256:AbC')).toBe('sha256:AbC')
+    expect(normalizeFingerprint('sha256:AbC=')).toBe(normalizeFingerprint('SHA256:AbC'))
   })
 })

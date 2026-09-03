@@ -12,3 +12,11 @@ export {
   parseRemoteUrl,
 } from './url.ts'
 export type { RemoteUrlErrorCode } from './url.ts'
+export {
+  DuplicateKeyRefError,
+  DuplicateMachineError,
+  MissingCredentialError,
+  RemoteRegistry,
+  UnknownMachineError,
+} from './registry.ts'
+export type { RegistryStore } from './registry.ts'

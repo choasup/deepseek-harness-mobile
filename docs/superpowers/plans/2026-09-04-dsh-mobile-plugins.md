@@ -1281,6 +1281,26 @@ git commit -m "feat(shell-ssh): 远程执行、输出截断、超时与取消"
 
 一句话：**宁可什么都不声称，也不要声称一个假的约束。**
 
+**从 dsh 真实类型里读到的契约（实施时查证，几条推翻了草稿）：**
+
+| 事实 | 出处 | 影响 |
+| --- | --- | --- |
+| *"`run` rejects only for infrastructure failures. Nonzero exits, timeout kills, and abort kills resolve with a `ShellRunResult`."* | `ShellExecutor` 文档注释 | 连接丢失该 **reject**，这是 dsh 规定的，不是我们的 judgment call |
+| *"`done` never rejects... spawn failures settle as `killed` with the error on stderr"* | `ShellProcess` 文档注释 | `start()` 遇断连要落到 `killed` + stderr 写原因，**不能 reject** |
+| stderr 在 delta 里放在 **`[stderr]`** 标记下，且**仅在有 stderr 时** | `dsh-bash-local` 包描述 | 别自己发明标记格式 |
+| `ShellExecSpec.sandboxPolicy` 是**必填**（`SandboxExecutionPolicy \| undefined`） | `dsh-shell/types.d.ts` | Task 7 的适配层要显式填 `undefined` |
+
+**`sandboxPolicy` 对本执行器完全惰性**（读编译后的 JS 查证，不是从 .d.ts 推理）：
+`dsh-tool-bash` 按 `defaultMode = ctx.shell.sandboxMode` 条件构造该字段
+（`...policy !== void 0 ? { sandboxPolicy: policy } : {}`），而我们的 getter 返回
+`undefined`，所以那个键**根本不会出现在请求里**。Task 7 填 `undefined` 正是
+`dsh-tool-bash` 本来就会产生的值，下游没有任何地方读它或对它抛错。
+
+**机器名不要塞进 stderr。** 每条命令都加前缀，会让**本来 stderr 为空的成功命令
+变成"有 stderr 输出"**——下游（包括模型自己）把空 stderr 当作"干净运行"的判断
+就全被污染了。机器名属于**说一次**的常驻上下文，归 Task 7 通过 system prompt /
+工具描述提供。
+
 
 
 把前两个任务组装成 dsh 认识的服务。**动手前先读**

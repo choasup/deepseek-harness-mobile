@@ -325,5 +325,182 @@ describe('SshConnectionPool', () => {
       const clientC = await pool.acquire(pinned)
       expect(clientC).toBe(clientB)
     })
+
+    it('C2：撞上 in-flight 连接时也要校验指纹，不能靠 pending 合并绕过', async () => {
+      // 复现：一次未固定指纹的 acquire 正在建连（还没进 this.clients，
+      // 只在 this.pending 里）；另一次带着错误指纹的 acquire 几乎同时
+      // 到达，撞上同一个 key 的 in-flight 条目。修复前，pending 命中分支
+      // 直接 `return inflight`，完全不比较指纹——带错误指纹的调用者会
+      // "成功"拿到一条从未按它的指纹验证过的连接，指纹校验形同虚设。
+      sshd = await startFakeSshd()
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const unpinned = machineFor(sshd.port)
+      const wrongFingerprint = `sha256:${'A'.repeat(43)}`
+      const pinned = { ...unpinned, hostFingerprint: wrongFingerprint }
+
+      const [unpinnedResult, pinnedResult] = await Promise.allSettled([
+        pool.acquire(unpinned),
+        pool.acquire(pinned),
+      ])
+
+      expect(unpinnedResult.status).toBe('fulfilled')
+      // 关键断言：带着错误指纹撞上同一个 in-flight 连接的那次 acquire
+      // 必须失败——它落到"指纹不匹配，摘除重连"分支，重新建连时真的会
+      // 用这个错误指纹去校验，理应连不上，而不是悄悄拿到 in-flight 那条
+      // 从未验证过指纹的连接。
+      expect(pinnedResult.status).toBe('rejected')
+      if (pinnedResult.status === 'rejected') {
+        expect(pinnedResult.reason).toBeInstanceOf(SshError)
+        expect((pinnedResult.reason as SshError).code).toBe('SSH_FINGERPRINT_MISMATCH')
+        expect((pinnedResult.reason as SshError).recoverable).toBe(false)
+      }
+    })
+
+    it('并发的两次正确指纹 acquire 都各自摘除重连、互相顶替时，被顶替的一方会被关闭而不是泄漏', async () => {
+      // 这是 C2 修复之外仍然存在的一条更窄的残留竞态（acquire() 里也有
+      // 注释说明）：两次几乎同时到达、都撞上同一条"未按当前指纹验证过"
+      // 的 in-flight 连接的调用者，会在它 resolve 之后各自独立摘除、
+      // 各自重新建连——彼此看不到对方也在重连，所以真的会产生两条独立的
+      // 新连接，而不是合并成一条。
+      //
+      // 关键是三个 acquire 必须**同时**发起、都撞上同一条还没 resolve 的
+      // in-flight 连接——如果先把未固定指纹那次 await 到完成再发起两次
+      // 固定指纹的 acquire（曾经这么写过，测试测不出问题），"摘除 +
+      // 重新建连" 的整个同步阶段会在第二次 acquire() 开始之前就跑完，
+      // 第二次会经由 pending 分支正常合并到第一次身上，触发不了这条竞态。
+      // 只有三个 await inflight 的continuation 都排在同一个已 resolve
+      // 的 Promise 后面、各自在自己的微任务里独立执行"发现指纹不对 ->
+      // 摘除 -> 建新连接"，才会真的产生两条独立连接。
+      //
+      // 不会绕过指纹校验（两条新连接都会被正确校验，这里两个指纹都是
+      // 对的，所以都会成功），但池的 this.clients 只能记住最后一个 set
+      // 进去的——测的就是先完成的那一条被顶替时会被主动关闭，而不是
+      // 变成一条谁都够不着的活连接。
+      sshd = await startFakeSshd()
+      const fingerprint = await captureHostFingerprint(sshd.port)
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const unpinned = machineFor(sshd.port)
+      const pinned = { ...unpinned, hostFingerprint: fingerprint }
+
+      const [unpinnedClient, clientX, clientY] = await Promise.all([
+        pool.acquire(unpinned),
+        pool.acquire(pinned),
+        pool.acquire(pinned),
+      ])
+
+      expect(clientX).not.toBe(unpinnedClient)
+      // 两次 acquire() 各自调用了 connect()，一定是两个不同的 Client 实例
+      // ——这个断言本身就是在确认这条残留竞态确实被触发了，而不是被
+      // pending 合并掉了。
+      expect(clientX).not.toBe(clientY)
+      expect(pool.size).toBe(1)
+
+      const survivor = await pool.acquire(pinned)
+      const displaced = survivor === clientX ? clientY : clientX
+      // 等被顶替那条真正触发 'close'——这本身就是"它被关掉了"的证据；
+      // 如果被顶替的连接遭到泄漏（既不在池里、进程里也没有别的东西去
+      // 关它），这个 Promise 永远不会 resolve，测试会超时失败。
+      await new Promise<void>((resolve) => displaced.once('close', resolve))
+      expect(pool.size).toBe(1)
+    })
+  })
+
+  describe('C3：disposeAll 与 acquire 竞争时，pending 条目不能被按 key 误删', () => {
+    it('acquire-1 的连接尝试因世代号不匹配而失败时，不会误删 acquire-2 刚装进 pending 的条目', async () => {
+      // 复现步骤（跟 acquire() 里 C3 那段注释描述的一致）：
+      //   1. acquire-1 发起 attemptA，装进 pending（还没连上，credentials()
+      //      的 await 让它让出控制权）。
+      //   2. disposeAll()：世代号自增、清空 pending（attemptA 仍在后台跑，
+      //      因为 pending.clear() 只是清空 map，不取消已经在跑的 Promise）。
+      //   3. acquire-2 为同一个 key 发起 attemptB，装进 pending。
+      //   4. attemptA 随后握手成功，但世代号已经不匹配，自己关掉、抛
+      //      SSH_DISCONNECTED——acquire-1 的 finally 执行。修复前：无条件
+      //      `pending.delete(key)` 会把此刻属于 attemptB 的条目删掉。
+      //   5. acquire-3 这时候如果在 pending 里找不到 attemptB（已被误删），
+      //      会另起一条 attemptC——池里最终只记得住最后 set 进去的那条，
+      //      前一条变成一条没有任何句柄能关掉的活连接。
+      // 修复后，acquire-2 和 acquire-3 应该拿到同一个 Client 实例。
+      sshd = await startFakeSshd()
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const machine = machineFor(sshd.port)
+
+      const acquire1 = pool.acquire(machine) // attemptA，故意不等
+      await pool.disposeAll() // 世代号自增、清空 pending；attemptA 仍在后台跑
+
+      const acquire2 = pool.acquire(machine) // attemptB，装进刚清空的 pending
+
+      await expect(acquire1).rejects.toSatisfy(
+        (err: unknown) => err instanceof SshError && err.code === 'SSH_DISCONNECTED',
+      )
+      // 到这里，attemptA 的 finally 已经执行过——如果 bug 还在，attemptB
+      // 在 pending 里的条目已经被误删。
+
+      const acquire3 = pool.acquire(machine) // 如果 bug 还在，这里会另起 attemptC
+
+      const [clientB, clientC] = await Promise.all([acquire2, acquire3])
+      expect(clientC).toBe(clientB) // 修复后：acquire-3 复用 acquire-2 的同一条连接
+      expect(pool.size).toBe(1)
+    })
+  })
+
+  describe('onDisconnect 回调', () => {
+    it('ready 之后的一次真实故障（error 紧跟 close）只触发一次通知，携带那次错误', async () => {
+      sshd = await startFakeSshd()
+      const events: Array<{ machine: RemoteMachine; error: Error | undefined }> = []
+      pool = new SshConnectionPool({
+        credentials: async () => ({ password: 'x' }),
+        onDisconnect: (machine, error) => { events.push({ machine, error }) },
+      })
+      const machine = machineFor(sshd.port)
+      const client = await pool.acquire(machine)
+
+      // 摧毁底层 socket 模拟真实故障——经验证这会先后触发 client 的
+      // 'error'（level: 'client-socket'）和 'close'，顺序固定。
+      const underlyingSocket = (client as unknown as { _sock?: { destroy(err?: Error): void } })._sock
+      expect(underlyingSocket).toBeDefined()
+      underlyingSocket?.destroy(new Error('模拟的底层 socket 故障'))
+
+      await waitForPoolSize(pool, 0)
+      // 关键断言：不是两次（一次带 error、一次不带），是恰好一次，且带着
+      // 那次 'error' 事件的错误对象。
+      expect(events.length).toBe(1)
+      expect(events[0]?.machine).toBe(machine)
+      expect(events[0]?.error).toBeInstanceOf(Error)
+    })
+
+    it('evict() 摘除的连接（指纹校验触发）不会误报成一次断线', async () => {
+      sshd = await startFakeSshd()
+      const fingerprint = await captureHostFingerprint(sshd.port)
+      const events: Array<{ machine: RemoteMachine; error: Error | undefined }> = []
+      pool = new SshConnectionPool({
+        credentials: async () => ({ password: 'x' }),
+        onDisconnect: (machine, error) => { events.push({ machine, error }) },
+      })
+
+      const unpinned = machineFor(sshd.port)
+      const clientA = await pool.acquire(unpinned)
+      const clientAClosed = new Promise<void>((resolve) => clientA.once('close', () => resolve()))
+
+      const pinned = { ...unpinned, hostFingerprint: fingerprint }
+      await pool.acquire(pinned) // 摘除 clientA，换上一条新验证过指纹的连接
+
+      await clientAClosed
+      // clientA 真的关闭了（上面已经 await 过它的 'close' 事件），但这是
+      // 池自己决定的摘除，调用方刚刚成功拿到了一条健康的替代连接——不
+      // 该收到一次"断线"通知。
+      expect(events.length).toBe(0)
+    })
+
+    it('disposeAll 关闭的连接不会触发 onDisconnect', async () => {
+      sshd = await startFakeSshd()
+      const events: Array<{ machine: RemoteMachine; error: Error | undefined }> = []
+      pool = new SshConnectionPool({
+        credentials: async () => ({ password: 'x' }),
+        onDisconnect: (machine, error) => { events.push({ machine, error }) },
+      })
+      await pool.acquire(machineFor(sshd.port))
+      await pool.disposeAll()
+      expect(events.length).toBe(0)
+    })
   })
 })

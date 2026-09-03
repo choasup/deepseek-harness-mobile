@@ -21,11 +21,19 @@ export interface SshConnectionPoolOptions {
    *
    * 这条钩子存在的原因：握手阶段的失败会通过 acquire() 的 rejection 直接
    * 交给调用方，但 ready 之后的失败没有一个天然的"调用方"在等着——没人在
-   * await 一个已经 resolve 过的 Promise。以前的实现里，握手阶段和 ready
-   * 之后共用同一个 close/error 监听器，靠 `settled` 标志让第二次触发变成
-   * no-op——这意味着 ready 之后的真实错误被无声吞掉，调用方唯一能看到的
-   * 后果是 pool.size 悄悄减一。有了这个钩子，池至少能把"发生了什么"报出去；
-   * 具体怎么处理（重试、告警）留给上层。
+   * await 一个已经 resolve 过的 Promise。有了这个钩子，池至少能把"发生了
+   * 什么"报出去；具体怎么处理（重试、告警）留给上层。
+   *
+   * 约定的调用契约（跟实现一起改过一轮，写下来避免下次又漂移）：
+   * - **每条连接的每次意外断线，最多触发一次**——即使 ssh2 先后发出
+   *   'error' 再 'close' 这一对事件（实测：把 ready 之后的连接底层
+   *   socket 强行摧毁，观察到的顺序确实是 `error` 然后紧跟 `close`），
+   *   也只会收到一次调用，`error` 参数携带那次 'error' 事件的错误对象
+   *   （如果有）。
+   * - **只报告意外断线，不报告池自己主动关掉的连接**——`evict()`（指纹
+   *   校验触发的摘除重连）和 `disposeAll()` 关闭的连接不会触发这个钩子。
+   *   调用方不需要（也不应该）把"我自己主动换了一条连接"当成一次
+   *   "断线"来处理。
    */
   onDisconnect?(machine: RemoteMachine, error?: Error): void
 }
@@ -64,6 +72,21 @@ export class SshConnectionPool {
   /** key -> 建连时实际校验通过的指纹（未固定则为 undefined）。见 acquire() 里的复用判断。 */
   private readonly verifiedFingerprints = new Map<string, string | undefined>()
   private readonly pending = new Map<string, Promise<Client>>()
+  /**
+   * 池自己主动关掉的连接——evict()（指纹校验触发的摘除重连、或者一场
+   * "赢家通吃"的并发重连里被顶替的一方）和 disposeAll() 都会先把 client
+   * 加进来再调用 end()。watchForDisconnect 的 'close' 处理器看到这里有
+   * 记录，就知道这次关闭是意料之中的，不该当成 onDisconnect 意义上的
+   * "断线"报出去。
+   */
+  private readonly intentionallyClosed = new WeakSet<Client>()
+  /**
+   * 记录 ready 之后那次 'error' 事件带的错误，供随后必然跟着来的 'close'
+   * 取用——两者合并成 onDisconnect 的一次调用，而不是各触发一次（实测
+   * ssh2 对一次真实故障总是先 'error' 后 'close'，参见 onDisconnect 的
+   * 文档注释）。
+   */
+  private readonly pendingDisconnectError = new WeakMap<Client, Error>()
   private readonly options: SshConnectionPoolOptions
   /**
    * disposeAll() 每次调用递增。一条正在建连的连接完成握手后，会拿自己开始
@@ -106,18 +129,50 @@ export class SshConnectionPool {
     }
 
     const inflight = this.pending.get(key)
-    if (inflight) return inflight
+    if (inflight) {
+      // C2 修复：这条分支之前直接 `return inflight`，完全跳过指纹校验——
+      // 一个带着已固定指纹的 acquire() 撞上一条别人发起的、未固定指纹的
+      // in-flight 连接，会原样拿到那条从来没按自己的指纹验证过的连接，
+      // 而且是"成功"地拿到，不是报错。这正是 I1 要防的场景，只是它活在
+      // pending 这条路径上没被堵上——Task 9 一边写指纹固定，一边可能有
+      // 别的调用方正在 acquire 同一台机器，就会撞上这个口子。等它结束后
+      // 照 acquire()"缓存命中"分支同样的规则比较：指纹相同才复用，否则
+      // 摘除、落到下面重新建连（重新建连时会真的用 requestedFingerprint
+      // 去校验）。
+      const client = await inflight
+      if (this.verifiedFingerprints.get(key) === requestedFingerprint) return client
+      this.evict(key, client)
+    }
+    // 上面这条 in-flight 分支如果失败（inflight 被 reject），`await inflight`
+    // 会让当前这次 acquire() 原样带着那个失败继续往外抛，不会走到下面重新
+    // 建连——机器连不上或者认证被拒是这台机器此刻的客观状态，跟请求方用
+    // 哪个指纹去问无关，重新起一次只会更慢地拿到同一个错误。
 
     // 经验证：`this.connect(...)` 在这里同步执行到它自己的第一个 await 为止
     // 才把一个 pending Promise 交回来，紧接着的 `pending.set` 也是同步的——
     // 两次几乎同时的 acquire()（比如 Promise.all 里那两个）在事件循环让出
     // 控制权之前就已经共享了同一个 `attempt`，不会各自起一条连接。
+    //
+    // 例外：上面 in-flight 分支里因指纹不符摘除重连的这条路径不受这条
+    // 保证覆盖——两个几乎同时到达、都撞上同一条待验证连接的调用者，会
+    // 分别在各自的微任务里独立摘除、独立起一条新连接，彼此看不到对方也
+    // 在重连（这里不会重新检查一次 `pending`）。已知的残留竞态，不是本次
+    // 修复的目标；下面 `connect()` 里 `this.clients.set` 前的顶替检查
+    // 保证这种情况下不会真的泄漏连接，只是不够"合并"。
     const attempt = this.connect(machine, key, requestedFingerprint)
     this.pending.set(key, attempt)
     try {
       return await attempt
     } finally {
-      this.pending.delete(key)
+      // C3 修复：按身份而不是按 key 摘除 pending 条目。场景：acquire-1
+      // 发起 attemptA；disposeAll() 清空 pending（attemptA 仍在后台跑）；
+      // acquire-2 为同一个 key 发起 attemptB、装进 pending；attemptA 随后
+      // 因为世代号不匹配而失败，它的这个 finally 如果无条件按 key 删，会
+      // 把刚装进去的 attemptB 条目错误摘除——下一个 acquire-3 找不到
+      // attemptB，会再起一条 attemptC，池里只记得住最后一个 set 进去的，
+      // 前一条变成一条没有任何句柄能关掉的活连接（已用测试复现：不加这个
+      // 判断时，acquire-2 和 acquire-3 最终会是两个不同的 Client 实例）。
+      if (this.pending.get(key) === attempt) this.pending.delete(key)
     }
   }
 
@@ -130,6 +185,10 @@ export class SshConnectionPool {
       this.clients.delete(key)
       this.verifiedFingerprints.delete(key)
     }
+    // I8 修复：这是池自己决定要关掉的连接（指纹不再匹配），不是一次意外
+    // 断线——标记一下，watchForDisconnect 的 'close' 处理器看到会跳过
+    // onDisconnect 通知。
+    this.intentionallyClosed.add(client)
     client.end()
   }
 
@@ -164,6 +223,18 @@ export class SshConnectionPool {
     if (generation !== this.generation) {
       client.end()
       throw new SshError(`连接池已释放，丢弃 ${machine.name} 的这次连接尝试`, 'SSH_DISCONNECTED', true)
+    }
+
+    // 兜底防线，不是本次修复的主路径：`acquire()` 里已知有一条残留竞态
+    // ——两个几乎同时到达、都撞上同一条待验证连接的调用者会各自独立摘除、
+    // 独立重连（见 acquire() 里的注释），两条新连接都可能成功，最终会有
+    // 一条"赢家通吃"地留在 `this.clients`，另一条被顶替。顶替发生时绝不能
+    // 让被顶替的那条悄悄泄漏——它已经完成了握手、已经发送过凭据，是一条
+    // 真实存活的连接，找不到句柄的话跟 C3 是同一类问题，只是入口不同。
+    const displaced = this.clients.get(key)
+    if (displaced && displaced !== client) {
+      this.intentionallyClosed.add(displaced)
+      displaced.end()
     }
 
     this.clients.set(key, client)
@@ -267,6 +338,14 @@ export class SshConnectionPool {
    * 样了"，跟 handshake() 的监听器完全独立（互不残留）。
    */
   private watchForDisconnect(client: Client, machine: RemoteMachine, key: string): void {
+    client.on('error', (err: Error) => {
+      // I8 修复：不在这里直接调用 onDisconnect。实测对 ready 之后的一次
+      // 真实故障（比如底层 socket 被摧毁），ssh2 总是先 'error' 后紧跟
+      // 'close'——如果两个事件各自调用一次 onDisconnect，调用方会收到
+      // 两次通知：一次带错误、一次不带，代表同一次故障。这里只记下错误，
+      // 真正的通知留给 'close' 去发，两个事件合并成一次调用。
+      this.pendingDisconnectError.set(client, err)
+    })
     client.on('close', () => {
       // I2 修复：只在这个 key 此刻仍然指向这个 client 时才摘除——见 evict()
       // 里同样的身份检查，这里是它的另一处必要场景：一条已经被 acquire()
@@ -276,12 +355,18 @@ export class SshConnectionPool {
         this.clients.delete(key)
         this.verifiedFingerprints.delete(key)
       }
-      this.options.onDisconnect?.(machine)
-    })
-    client.on('error', (err: Error) => {
-      // 'error' 之后紧跟着的 'close' 会负责摘除，这里不重复摘除，只负责
-      // 把错误对象带给 onDisconnect（'close' 时错误信息已经丢了）。
-      this.options.onDisconnect?.(machine, err)
+
+      const error = this.pendingDisconnectError.get(client)
+      this.pendingDisconnectError.delete(client)
+
+      // I8 修复：`intentionallyClosed` 里有记录，说明这次关闭是池自己
+      // 干的（指纹校验摘除、赢家通吃顶替、或者 disposeAll），不是一次
+      // 意外断线——evict() 摘除、随后重新拿到一条健康连接的那次 acquire()
+      // 不该因此收到一次"断线"通知，调用方看到的应该是"这台机器好好的"。
+      // `WeakSet.delete` 顺手把记录清掉，返回值就是"删之前在不在"。
+      if (this.intentionallyClosed.delete(client)) return
+
+      this.options.onDisconnect?.(machine, error)
     })
   }
 
@@ -291,6 +376,11 @@ export class SshConnectionPool {
     this.generation++
 
     const clients = [...this.clients.values()]
+    // I8 修复：这一批连接是被 disposeAll() 主动关闭的，不是意外断线——
+    // 标记一下，watchForDisconnect 的 'close' 处理器会跳过 onDisconnect
+    // 通知（调用方没必要在"我自己主动释放了整个池"这件事上再被通知一次
+    // "断线"）。
+    for (const client of clients) this.intentionallyClosed.add(client)
     this.clients.clear()
     this.verifiedFingerprints.clear()
     this.pending.clear()
@@ -306,14 +396,24 @@ export class SshConnectionPool {
   private static awaitClose(client: Client): Promise<void> {
     return new Promise((resolve) => {
       let settled = false
-      const finish = () => {
+      // I10 修复：这个兜底定时器如果不清理，会在"'close' 先于超时触发"的
+      // 正常路径里继续挂在事件循环上直到 2 秒真的过去——实测 disposeAll()
+      // 的 Promise 已经 resolve 了，进程却因为这个定时器还多等了整整
+      // 2002ms 才能退出，对一个 CLI 来说是肉眼可见的退出卡顿。finish()
+      // 里 clearTimeout 是主路径的修复；unref() 是双保险，就算某处疏漏
+      // 没走到 clearTimeout，这个定时器本身也不会拦着进程退出。
+      const timer = setTimeout(finish, 2_000)
+      timer.unref()
+
+      function finish(): void {
         if (settled) return
         settled = true
+        clearTimeout(timer)
         resolve()
       }
+
       client.once('close', finish)
       client.end()
-      setTimeout(finish, 2_000)
     })
   }
 }

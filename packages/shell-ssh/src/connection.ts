@@ -373,24 +373,61 @@ export class SshConnectionPool {
         settle(new SshError(`到 ${machine.name} 的连接在完成握手前就已关闭`, 'SSH_DISCONNECTED', true))
       })
 
-      client.connect({
-        host: machine.host,
-        port: machine.port,
-        username: machine.user,
-        privateKey: creds.privateKey,
-        passphrase: creds.passphrase,
-        password: creds.password,
-        readyTimeout: this.options.connectTimeoutMs ?? 15_000,
-        hostVerifier: (hostKeyBlob: Buffer): boolean => {
-          observedFingerprint = fingerprintOfHostKey(hostKeyBlob)
-          // 没有固定指纹：本次是可信首连（TOFU）。固定 UI 是 Task 9 的事，
-          // 这里只负责"固定了就必须匹配"这一半。
-          if (!pinnedFingerprint) return true
-          if (observedFingerprint === pinnedFingerprint) return true
-          fingerprintMismatch = true
-          return false
-        },
-      })
+      // Task 7 复审发现：ssh2 的 Client#connect() 对无法使用的 privateKey 是**同步
+      // 抛出**，不会走上面 client.on('error', ...) 那条映射——已经实测验证
+      // 过（见本文件对应的单测），且读过 ssh2 1.17.0 的 client.js 源码确认
+      // 原因：`parseKey(this.config.privateKey, cfg.passphrase)` 发生在
+      // 创建 socket 之前，是纯本地校验，从不触发任何事件。至少两种真实
+      // 场景会走到这里，两者是同一个 throw 语句：
+      //   1. 密钥格式不对（贴错成 PuTTY .ppk、复制时截断、整段不是密钥）；
+      //   2. 密钥加密了但没给 passphrase，或者 passphrase 给错了——
+      //      parseKey() 内部解密失败时返回一个 Error，这里的代码原样
+      //      `throw new Error('Cannot parse privateKey: ' + ...)`，跟纯格式
+      //      错误共用同一个错误文案前缀，这里没法（也不需要）进一步区分。
+      // 紧接着还有一个独立的同步 throw：密钥解析成功、但只含公钥部分
+      // （`getPrivatePEM() === null`，比如手滑存成了 .pub 文件的内容）。
+      // 两个 throw 都发生在 socket 创建之前（`this._sock = ...` 是后面才
+      // 赋值的），所以不需要额外清理任何 socket——这条路径上从来没有过
+      // 网络层的东西可清。
+      //
+      // 不接住的话，这个裸 Error 直接从 handshake() 冒泡出去，绕过
+      // Tasks 6/7 靠 isSshError 做的错误路由，把"用户存的密钥有问题"——这
+      // 整条链路里用户最可能犯的错——归到"未分类错误"分支，恰恰是提示最
+      // 没用的那一种。分类成 SSH_AUTH_FAILED 而不是 SSH_NO_CREDENTIAL：
+      // 后者是"压根没配密钥"，这里是"配了，但用不了"，两者要求用户做
+      // 完全不同的事（去配一把 vs 去修这一把），必须保持可区分——这正是
+      // Task 6 花一整轮才分清楚的两个 code，这里不能又混到一起。
+      // `recoverable: false`：本地重放同一把解析不出来的 key 不会有不同
+      // 结果，值得重试的是"换一把 key"，不是"再试一次"。
+      try {
+        client.connect({
+          host: machine.host,
+          port: machine.port,
+          username: machine.user,
+          privateKey: creds.privateKey,
+          passphrase: creds.passphrase,
+          password: creds.password,
+          readyTimeout: this.options.connectTimeoutMs ?? 15_000,
+          hostVerifier: (hostKeyBlob: Buffer): boolean => {
+            observedFingerprint = fingerprintOfHostKey(hostKeyBlob)
+            // 没有固定指纹：本次是可信首连（TOFU）。固定 UI 是 Task 9 的事，
+            // 这里只负责"固定了就必须匹配"这一半。
+            if (!pinnedFingerprint) return true
+            if (observedFingerprint === pinnedFingerprint) return true
+            fingerprintMismatch = true
+            return false
+          },
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        settle(
+          new SshError(
+            `机器 '${machine.name}' 配置的私钥无法使用（本地解析失败，还没有连上服务器）：${message}`,
+            'SSH_AUTH_FAILED',
+            false,
+          ),
+        )
+      }
     })
   }
 

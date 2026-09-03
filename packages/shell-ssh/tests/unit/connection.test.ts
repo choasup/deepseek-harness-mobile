@@ -259,6 +259,55 @@ describe('SshConnectionPool', () => {
     await expect(pool.acquire(machineFor(sshd.port))).rejects.toBe(original)
   })
 
+  // ---------------------------------------------------------------------
+  // 协调者验证 Task 7 时发现的真实缺陷：ssh2 的 Client#connect() 对一把
+  // 解析不出来的 privateKey 是**同步抛出**（读过 ssh2 1.17.0 的
+  // client.js 源码确认：parseKey() 发生在创建 socket 之前，纯本地校验，
+  // 从不触发任何事件），会绕过 client.on('error', ...) 那条映射，原样
+  // 冒泡成一个裸 Error——这跟 I7（credentials() 回调抛错）是同一个物种，
+  // 但 I7 当时只包住了回调本身，没接住 connect() 紧接着这一行的同步抛出。
+  // ---------------------------------------------------------------------
+
+  it('私钥格式无法解析（贴错格式/整段不是密钥）时，抛 SSH_AUTH_FAILED 而不是裸 Error', async () => {
+    sshd = await startFakeSshd()
+    pool = new SshConnectionPool({ credentials: async () => ({ privateKey: '不是一把有效的私钥' }) })
+    await expect(pool.acquire(machineFor(sshd.port))).rejects.toSatisfy(
+      (err: unknown) =>
+        // 不是 SSH_NO_CREDENTIAL——"配了但用不了"跟"压根没配"要求用户做
+        // 完全不同的事，必须保持可区分，这里用字面量相等断言直接锁死。
+        err instanceof SshError
+        && err.code === 'SSH_AUTH_FAILED'
+        && !err.recoverable
+        // ssh2 的原始报错文本要保留，用户才知道自己的密钥具体错在哪。
+        && err.message.includes('Cannot parse privateKey'),
+    )
+  })
+
+  it('privateKey 字段错填成一把公钥（没有私钥部分）时，同样抛 SSH_AUTH_FAILED 而不是裸 Error', async () => {
+    sshd = await startFakeSshd()
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    })
+    const parsedKey = ssh2.utils.parseKey(privateKey)
+    if (parsedKey instanceof Error) throw parsedKey
+    // ssh2 认得的 OpenSSH 公钥行形式（"ssh-rsa AAAA..."）——这条命中的是
+    // parseKey() 成功之后、`getPrivatePEM() === null` 那个独立的同步
+    // throw，跟上一个测试命中的"格式解析失败"是 client.js 里紧挨着的
+    // 两条不同语句，值得分别验证都被接住了。
+    const opensshPublicLine = `${parsedKey.type} ${parsedKey.getPublicSSH().toString('base64')}`
+
+    pool = new SshConnectionPool({ credentials: async () => ({ privateKey: opensshPublicLine }) })
+    await expect(pool.acquire(machineFor(sshd.port))).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SshError
+        && err.code === 'SSH_AUTH_FAILED'
+        && !err.recoverable
+        && err.message.includes('does not contain a (valid) private key'),
+    )
+  })
+
   describe('主机指纹校验', () => {
     it('未固定指纹时按可信首连处理，正常连接', async () => {
       sshd = await startFakeSshd()

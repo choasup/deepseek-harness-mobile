@@ -67,7 +67,12 @@ Task 6 的复审就因此误判我的一处引证是"无法验证"。参考实�
 另外：`.d.ts` 说的是"类型上允许什么"，`lib/*.js` 说的是"运行时实际发生什么"。
 对"这个字段会不会被读"这类问题，两者给出的答案经常不同——要读后者。
 
-**6. 类型定义在本机可读。** 写代码前先读这两个文件，它们是唯一权威：
+**6. 派活时不要禁掉任务本身需要的跨包改动。** Task 9 的规格里写明"必须顺带改
+连接池记录观察到的指纹"，但派活的指令写的是"不要修改 shell-ssh 里的任何东西"，
+于是那项没做，`discoveredFingerprint` 成了一个没有生产者的字段。
+**"只改这些文件"的边界要按任务的真实范围划，不能按包边界随手划。**
+
+**7. 类型定义在本机可读。** 写代码前先读这两个文件，它们是唯一权威：
 - `…/@deepseek-ai/dsh-shell/lib/types/types.d.ts` — `ShellExecRequest` / `ShellExecSpec` / `ShellRunResult` / `ShellProcess`
 - `…/@deepseek-ai/dsh-shell/lib/types/index.d.ts` — `ShellExecutor` 抽象类
 
@@ -1305,11 +1310,27 @@ git commit -m "feat(shell-ssh): 远程执行、输出截断、超时与取消"
 | stderr 在 delta 里放在 **`[stderr]`** 标记下，且**仅在有 stderr 时** | `dsh-bash-local` 包描述 | 别自己发明标记格式 |
 | `ShellExecSpec.sandboxPolicy` 是**必填**（`SandboxExecutionPolicy \| undefined`） | `dsh-shell/types.d.ts` | Task 7 的适配层要显式填 `undefined` |
 
-**`sandboxPolicy` 对本执行器完全惰性**（读编译后的 JS 查证，不是从 .d.ts 推理）：
-`dsh-tool-bash` 按 `defaultMode = ctx.shell.sandboxMode` 条件构造该字段
-（`...policy !== void 0 ? { sandboxPolicy: policy } : {}`），而我们的 getter 返回
-`undefined`，所以那个键**根本不会出现在请求里**。Task 7 填 `undefined` 正是
-`dsh-tool-bash` 本来就会产生的值，下游没有任何地方读它或对它抛错。
+**`sandboxMode` 返回 `undefined` 有三个连带效果，全都是对的**（读
+`dsh-tool-bash/lib/index.js` 查证，不是从 .d.ts 推理）：
+
+```js
+const defaultMode = ctx.shell.sandboxMode;
+const escalationModes = defaultMode === void 0 ? [] : ESCALATION_TARGETS;
+const sandboxPolicy = defaultMode === void 0 ? void 0 : ctx.get("sandboxPolicy");
+if (defaultMode !== void 0 && sandboxPolicy === void 0)
+  throw new Error("tool-bash: the mounted bash executor confines but ctx.sandboxPolicy is missing");
+...
+...policy !== void 0 ? { sandboxPolicy: policy } : {}
+```
+
+| 效果 | 后果 |
+| --- | --- |
+| `sandboxPolicy` 键**根本不出现在请求里** | Task 7 填 `undefined` 正是 dsh 本来会产生的值 |
+| `escalationModes` 变成 `[]` | 模型不会被提供"用更高沙箱权限重试"的选项——远程机器上本来就无可升级 |
+| 跳过那句 `throw` | **若返回非 undefined 的 mode 而 `ctx.sandboxPolicy` 未挂载，tool-bash 会在加载时直接抛错** |
+
+第三条尤其要紧：mobile profile 里 `sandbox` 那一行是被禁用的，所以如果按最初
+想法返回 `'danger-full-access'`，**整个 bash 工具会加载失败**。
 
 **`resolve()` 的职责是"默认值**和**上限"，不只是默认值。** dsh 在两处明说：
 `ShellExecRequest.timeoutMs` 是 *"Timeout override in milliseconds (implementations cap it)"*，
@@ -2114,6 +2135,31 @@ git commit -m "feat(remote-registry): 机器注册表，设置与密钥分离存
 ## Task 9: 分层连接探针
 
 spec §5.4 要求配置保存后立刻诊断，且失败要能指出是哪一层。
+
+> **实际实现比下面的草稿多三样**（实施与复审中补入，草稿未同步全部细节）：
+>
+> 1. **五个阶段**，不是四个：`tcp → credential → handshake → os → gpu`。
+>    `credential` 阶段来自 Task 8 复审的发现——`CredentialProvider.resolve` 是分层的、
+>    源含 `env`，机器可能悄悄用上环境里恰好存在的密钥。没配密钥时措辞要**避开"认证"
+>    二字**（有测试断言），因为"没配密钥"与"密钥被拒"的补救措施完全不同。
+>    并且要带 `writable`：`env` 源是 `writable: false`，provider **保证拒绝**
+>    `set`，所以对它说"请设置密钥"是一条必然失败的建议。
+> 2. **整体超时**（`ProbeOptions.timeoutMs`，默认 15s）与可选的 `signal`。
+>    超时后**必须返回 `stages` 的副本并置 settled 标志**——否则被放弃的那次运行
+>    仍持有同一个数组，挂起的依赖 40 秒后落地时会往已返回的报告里继续 push，
+>    Task 7 再渲染就看到 8 个阶段、`handshake` 出现两次。
+>    定时器要 `clearTimeout`（**不能用 `unref`**，React Native 的 timer shim 没有）。
+> 3. **`fingerprintStatus: 'unpinned' | 'matched' | 'mismatched'`**。只给一个裸的
+>    `discoveredFingerprint` 字符串，会让"从未固定"和"指纹不匹配"在 UI 上不可区分，
+>    于是两种情况都渲染出同一个一键"固定此指纹"——正是我们花三个任务避免的那种
+>    点穿警告。另外 `sshHandshake` 返回的指纹**必须校验格式**（`sha256:<base64>`）：
+>    `ssh-keygen -lf` 的原始输出是一整行、末尾多个 `\n` 都会被渲染成"指纹不匹配"，
+>    而假的不匹配警告比没有警告更糟。
+
+> **本任务还必须改 `shell-ssh`**：连接池的 `verifiedFingerprints` 记的是**请求的 pin**，
+> 不是**实际观察到的主机密钥**（TOFU 时服务器出示的密钥在 `hostVerifier` 里就被丢掉）。
+> 不改的话 `discoveredFingerprint` **没有生产者**，首次连接——唯一有意义的场景——
+> 拿不到指纹。`fingerprintOfHostKey` 已存在且已归一化，是一次赋值的事。
 
 **Files:**
 - Create: `packages/remote-registry/src/probe.ts`

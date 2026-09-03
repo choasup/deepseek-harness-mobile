@@ -11,6 +11,7 @@ import { SshConnectionPool, fingerprintOfHostKey } from '../../src/connection.ts
 import { SshError } from '../../src/errors.ts'
 import { startFakeSshd, type FakeSshd } from '../helpers/fake-sshd.ts'
 import type { RemoteMachine } from '@dsh-mobile/remote-registry'
+import { MissingCredentialError } from '@dsh-mobile/remote-registry'
 
 const { Client: SshClient } = ssh2
 
@@ -233,6 +234,21 @@ describe('SshConnectionPool', () => {
         && err.code === 'SSH_AUTH_FAILED'
         && !err.recoverable
         && err.message.includes('钥匙串解锁失败'),
+    )
+  })
+
+  it('credentials() 抛 MissingCredentialError 时映射成 SSH_NO_CREDENTIAL，不落进 SSH_AUTH_FAILED 兜底', async () => {
+    sshd = await startFakeSshd()
+    pool = new SshConnectionPool({
+      credentials: async () => { throw new MissingCredentialError('gpu-h20', 'REMOTE_KEY_GPU_H20') },
+    })
+    await expect(pool.acquire(machineFor(sshd.port))).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SshError
+        && err.code === 'SSH_NO_CREDENTIAL'
+        && !err.recoverable
+        && err.message.includes('gpu-h20')
+        && err.message.includes('REMOTE_KEY_GPU_H20'),
     )
   })
 

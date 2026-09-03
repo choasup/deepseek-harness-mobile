@@ -6,8 +6,13 @@ import { normalizeMachine, parseRemoteUrl } from './url.ts'
 import type { RemoteMachine, SshCredentials } from './types.ts'
 
 /**
- * 存储适配器。机器与密钥分开两条通道，因为私钥绝不能落进
- * 会被同步或导出的设置文档。
+ * 存储适配器。不是"读/写一个大 JSON blob"，而是按记录存取——这样设计
+ * 是为了让它直接对应 dsh 实际提供的东西：`ctx.storageDomain.open(spec)`
+ * 返回一个 `KvTable`（`get`/`put`/`delete`/`entries`），密钥则走
+ * `ctx.credentials` 的 `resolve`/`set`/`unset`。机器与密钥分开两条通道，
+ * 因为私钥绝不能落进会被同步或导出的设置文档。Task 10 写那个真实适配器；
+ * 不要把这个接口改成看起来更方便（比如"整表读一次"）的形状——per-record
+ * 是刻意对齐 dsh 的真实 API 形状，而不是随手选的。
  */
 export interface RegistryStore {
   listMachines(): Promise<RemoteMachine[]>
@@ -50,9 +55,11 @@ export class DuplicateKeyRefError extends Error {
  * 静默返回 `{}`。返回 `{}` 会让连接池落到"无认证材料"分支，最终从服务器
  * 那里收到一个和"密码/密钥真的错了"完全相同的认证拒绝，用户看到的只有
  * 一句语焉不详的认证失败，无从得知问题其实是"这台机器压根没配过密钥"。
- * 调用方（shell-ssh 的连接池，Task 7）可以 catch 这个类型，映射成一个
- * 比 SSH_AUTH_FAILED 更明确的提示，引导用户去调用 setPrivateKey，
- * 而不是让人怀疑密钥内容本身写错了。
+ * shell-ssh 的连接池（connection.ts）用下面的 isMissingCredentialError()
+ * 识别这个类型，映射成它自己的 `SSH_NO_CREDENTIAL`（区别于真正认证被拒的
+ * `SSH_AUTH_FAILED`）——"去配一把密钥"和"你的密钥不对"是两种要求用户
+ * 做完全不同的事的错误，混成一个 code 会让 Tasks 6/7 里靠 code 分流的
+ * 处理逻辑对这两种情况给出同一个（错误的）指引。
  */
 export class MissingCredentialError extends Error {
   readonly machineName: string
@@ -66,6 +73,15 @@ export class MissingCredentialError extends Error {
   }
 }
 
+/**
+ * shell-ssh（跨包）用它来判断 credentials() 抛出的是不是这一种，而不是
+ * 对着从另一个包 import 进来的 class 做裸 `instanceof`——类型守卫是这个
+ * 边界上更稳的契约，也让"怎么判断"这件事留在定义错误的包里维护。
+ */
+export function isMissingCredentialError(value: unknown): value is MissingCredentialError {
+  return value instanceof MissingCredentialError
+}
+
 export class RemoteRegistry {
   // 不能用参数属性——根 tsconfig 开了 erasableSyntaxOnly，
   // 参数属性在 Node 类型剥离下是硬 SyntaxError，而 vitest 走 esbuild 抓不到。
@@ -75,7 +91,12 @@ export class RemoteRegistry {
 
   async list(): Promise<RemoteMachine[]> {
     const machines = await this.store.listMachines()
-    return [...machines].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    // 显式钉住 'en' locale 的 localeCompare，而不是裸的 `<`/`>`：机器名
+    // 大小写都合法（'gpu-h20' 与 'GPU-Backup' 可以同时存在），逐码点比较
+    // 会把所有大写开头的名字排在所有小写名字前面（['Alpha','Zulu','beta']），
+    // 这对着手动录入的机器列表看起来像是排序坏了。'en' 参数钉死 locale，
+    // 不依赖运行环境的默认 locale，结果在任何机器上都一样。
+    return [...machines].sort((a, b) => a.name.localeCompare(b.name, 'en'))
   }
 
   async get(name: string): Promise<RemoteMachine | undefined> {
@@ -94,13 +115,40 @@ export class RemoteRegistry {
    * ——这正是 url.ts 里花了几轮才关掉的那个 bug，只是搬到了注册表这一层。
    * normalizeMachine 同时负责校验，非法机器在这里就被拒。
    *
-   * 原子性：这里是"读 listMachines 判重 -> 写 putMachine"，中间没有锁。
-   * 两个并发的 add() 调用可能都读到"还不存在"从而都通过判重，其中一个
-   * 悄悄覆盖另一个——这是已知且接受的限制（单一写者场景：一台手机上的
-   * 一个 app 实例，不是多进程共享数据库）。add() 本身只有一次写
-   * （putMachine），不涉及密钥通道，所以不会出现"写了一半"的部分失败：
-   * putMachine 要么成功要么整体抛错，调用方看到异常就知道没有任何东西
-   * 落地。
+   * **安全相关**：判重通过之后、写入机器记录之前，先对新机器的 keyRef
+   * 主动调用一次 deleteSecret()。一台刚 add() 出来的机器按定义没有密钥——
+   * 只有 setPrivateKey() 才能给它一把。但 keyRef 这个字符串槽位本身可能
+   * 已经有内容：要么是之前一台同名/同派生名的机器被 remove() 时留下的
+   * 孤儿密钥（见 remove() 的注释），要么——到了 Task 10，凭据来自
+   * `CredentialProvider.resolve`，它的数据源里包含裸的进程环境变量
+   * （env/file/project-env/user-env 这一叠）——单纯是主机上恰好导出了
+   * 一个叫 `REMOTE_KEY_GPU_H20` 的环境变量，跟这个注册表毫无关系。两种
+   * 情况都会导致：起一台新机器、从没调用过 setPrivateKey，credentialsFor()
+   * 却安静地返回了不属于这台机器的私钥。加了这行 deleteSecret 之后，
+   * 新机器的 keyRef 槽位保证是空的，credentialsFor() 会照实抛
+   * MissingCredentialError，而不是冒充"已配置"。
+   *
+   * 原子性：这里现在是"读 listMachines 判重 -> 写 deleteSecret 清槽 ->
+   * 写 putMachine"，中间没有事务，也没有锁。这不只是"两个并发 add()
+   * 调用互相踩"这么窄的问题——`RemoteRegistry` 上任意两个方法只要都做
+   * "读一下当前状态、await 一次、再写回去"，就可能在同一个进程里、
+   * 单线程 event loop 上被交错执行，不需要真的多进程/多线程。例如：
+   * `remove('x')` 先 `get('x')` 拿到机器（此时记录还在），同时另一处
+   * 代码对同一个 name 发起 `setPrivateKey('x', '...')`，它也 `get('x')`
+   * 拿到了同一条（还没删的）记录；`remove('x')` 的两次删除都跑完之后，
+   * `setPrivateKey` 的 `writeSecret` 才落地——最终产出的状态是"机器记录
+   * 没了，密钥却在"，正是 remove() 那段注释花了二十行想避免的孤儿密钥。
+   * Task 7 的 cordis 适配器 + 一个设置 UI 同时对着一个 `RemoteRegistry`
+   * 派发调用，就是这种交错的现实版本，不是理论上的边界情况。
+   *
+   * 这不是"RegistryStore 这个形状做不到原子"——dsh 的 `KvTable` 提供
+   * `update(key, fn)`：对同一条写链上的原子读-改-写，`fn` 看到的是它在
+   * 写队列里排到的那个时刻的值，并发的多个 update 不会交错。真做的话，
+   * 是在 Task 10 的适配器里把"判重-写入"这类操作实现成一次 `update`，
+   * 而不是这里"listMachines() 再 putMachine()"这两次独立调用。这里不
+   * 现在就改 `RegistryStore` 接口去暴露这种原子操作，是因为测试用的内存
+   * fake 用不上、Task 8 的范围也不包括重新设计存储接口；但这是"当前没做
+   * 到"，不是"做不到"——不要把这条限制读成这个存储形状天然的天花板。
    */
   async add(input: RemoteMachine): Promise<void> {
     const machine = normalizeMachine(input)
@@ -114,6 +162,7 @@ export class RemoteRegistry {
       throw new DuplicateKeyRefError(machine.name, conflict.name, machine.keyRef)
     }
 
+    await this.store.deleteSecret(machine.keyRef)
     await this.store.putMachine(machine)
   }
 

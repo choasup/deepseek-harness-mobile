@@ -5,6 +5,7 @@ export type SshErrorCode =
   | 'SSH_FINGERPRINT_MISMATCH' // 主机指纹与已固定值不符
   | 'SSH_DISCONNECTED'         // 连接中途断开
   | 'SSH_NO_MACHINE'           // 注册表里没有这台机器
+  | 'SSH_NO_CREDENTIAL'        // 机器在注册表里，但从没写过密钥（区别于密钥错误的 SSH_AUTH_FAILED）
 
 /** SshError 构造时可选携带的额外上下文，只有部分 code 会用到。 */
 export interface SshErrorDetails {

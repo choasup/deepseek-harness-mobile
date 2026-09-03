@@ -15,6 +15,7 @@ export type { RemoteUrlErrorCode } from './url.ts'
 export {
   DuplicateKeyRefError,
   DuplicateMachineError,
+  isMissingCredentialError,
   MissingCredentialError,
   RemoteRegistry,
   UnknownMachineError,

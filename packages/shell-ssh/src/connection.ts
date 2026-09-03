@@ -5,7 +5,7 @@ import ssh2 from 'ssh2'
 import type { Client } from 'ssh2'
 // SshCredentials 只在 remote-registry 里定义一次；这里复用，避免两处定义漂移。
 import type { RemoteMachine, SshCredentials } from '@dsh-mobile/remote-registry'
-import { normalizeFingerprint } from '@dsh-mobile/remote-registry'
+import { isMissingCredentialError, normalizeFingerprint } from '@dsh-mobile/remote-registry'
 import { isSshError, SshError } from './errors.ts'
 
 const { Client: SshClient } = ssh2
@@ -207,6 +207,17 @@ export class SshConnectionPool {
       // Tasks 6/7 靠 isSshError 做路由，一个漏网的裸 Error 会让它们的
       // switch/if 链落到 default 分支，处理成"未知错误"而不是"认证问题"。
       if (isSshError(err)) throw err
+      // remote-registry 的 credentialsFor() 在这台机器从没 setPrivateKey
+      // 过时会抛 MissingCredentialError，而不是返回 {} 悄悄落到"无认证
+      // 材料"分支。这里必须单独识别它、映射成 SSH_NO_CREDENTIAL，不能
+      // 落进下面 SSH_AUTH_FAILED 的兜底——"去配一把密钥"和"你配的密钥
+      // 不对"是两种要求用户做完全不同事情的错误，混成同一个 code 会让
+      // Tasks 6/7 里按 code 分流的处理逻辑给出错误的指引。用
+      // isMissingCredentialError 而不是裸 instanceof，因为这个类是从
+      // 另一个包 import 进来的。
+      if (isMissingCredentialError(err)) {
+        throw new SshError(err.message, 'SSH_NO_CREDENTIAL', false)
+      }
       const message = err instanceof Error ? err.message : String(err)
       throw new SshError(`取 ${machine.name} 的凭据失败：${message}`, 'SSH_AUTH_FAILED', false)
     }

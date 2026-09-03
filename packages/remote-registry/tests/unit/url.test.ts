@@ -326,6 +326,15 @@ describe('normalizeMachine', () => {
       hostFingerprint: 'sha256:AbC',
     })
   })
+
+  it('返回的 tags 是拷贝，不是输入数组的引用——调用方事后改自己那份不会连带改到返回值', () => {
+    const inputTags = ['gpu']
+    const m = normalizeMachine({
+      name: 'box', host: 'h.test', port: 22, user: 'me', keyRef: 'REMOTE_KEY_BOX', tags: inputTags,
+    })
+    inputTags.push('MUTATED-AFTER-NORMALIZE')
+    expect(m.tags).toEqual(['gpu'])
+  })
 })
 
 describe('normalizeFingerprint', () => {

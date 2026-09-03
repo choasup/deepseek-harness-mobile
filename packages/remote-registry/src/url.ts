@@ -179,7 +179,9 @@ export function normalizeMachine(machine: RemoteMachine): RemoteMachine {
     port: machine.port,
     user: machine.user,
     keyRef: machine.keyRef,
-    tags: machine.tags,
+    // 拷贝一份，不是引用原数组——否则调用方在 add() 之后继续拿着自己
+    // 那份 machine.tags 做 push/splice，会直接改到已经存进注册表的记录。
+    tags: [...machine.tags],
   }
   if (hostFingerprint) result.hostFingerprint = hostFingerprint
   if (machine.defaultWorkdir) result.defaultWorkdir = machine.defaultWorkdir

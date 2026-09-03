@@ -98,7 +98,7 @@ Node 18 因此被彻底排除。必须把 iOS 构建补丁抬到 Node 22.19+ 或
 │  │       ├── agent loop / session / skill / plan   │
 │  │       ├── tool-fs / tool-fs-search      纯 JS   │
 │  │       ├── subagent（进程内）                     │
-│  │       ├── dsh-terminal-ssh    ← 新写 (§5.3)     │
+│  │       ├── dsh-shell-ssh      ← 新写 (§5.3)     │
 │  │       └── dsh-remote-registry ← 新写 (§5.4)     │
 │  ├── WKWebView → http://127.0.0.1:<port>           │
 │  │   └── dsh client（33 个 UI 插件，layout 换移动版）│
@@ -139,19 +139,33 @@ Node 18 因此被彻底排除。必须把 iOS 构建补丁抬到 Node 22.19+ 或
 
 **收窄**：`mcp-client` 仅允许 `StreamableHTTPClientTransport`，禁 stdio
 
-**新增行**：`terminal-ssh`（§5.3）· `remote-registry`（§5.4）
+**新增行**：`shell-ssh`（§5.3）· `remote-registry`（§5.4）
 
-### 5.3 `dsh-terminal-ssh`
+### 5.3 `dsh-shell-ssh`（+ 后续 `dsh-terminal-ssh`）
 
-`dsh-terminal` 是服务接口，`dsh-terminal-bash` 只是它的一个 provider。新写一个 SSH provider 是这套架构的常规操作。
+**更正**：dsh 有两条彼此独立的执行缝，主 bash 工具走的不是 terminal——
+
+| 消费者 | 依赖的服务 | 契约 |
+|---|---|---|
+| `tool-bash`（主力） | `ctx.shell` | `ShellExecutor` 抽象类：`resolve()` / `run()` / `start()` |
+| `tool-bash-persistent` | `ctx.terminals` | `TerminalBackend`：`{ type, spawn() }` → `TerminalBackendSession` |
+
+因此 v1 的主交付是 **`dsh-shell-ssh`**，实现 `ShellExecutor`，参考实现是 `dsh-bash-local`
+（`class LocalBashExecutor extends ShellExecutor`，带 `static inject` 与 `static Config: z<Config>`）。
+PTY 版 `dsh-terminal-ssh`（实现 `TerminalBackend`）推迟——它需要远程前台进程组的 pgid，
+而 SSH exec channel 拿不到，须走 shell channel + 远程查询，复杂度不属于 v1。
 
 - 基于 `ssh2`（纯 JS；可选的 `cpu-features` 原生加速不装也能跑）
-- 提供与 `dsh-terminal-bash` 相同的接口契约：执行命令、流式输出、超时、取消
-- 支持持久会话（复用一条 SSH 连接的多个 channel），对应 `tool-bash-persistent` 的语义
-- 连接复用与自动重连；断线时向 agent 返回明确的可恢复错误
+- `run(spec)` 一次性执行，返回 `ShellRunResult`（exitCode / signal / timedOut / aborted / stdout / stderr）
+- `start(spec)` 返回 `ShellProcess`，支持增量 `readOutput()` 与 `kill()`
+- `resolve(request)` 把 `ShellExecRequest` 补全为 `ShellExecSpec`（workdir / timeoutMs / stdoutMaxBytes 的默认值）
+- 连接复用（一条 SSH 连接跑多个 exec channel）与自动重连；断线向 agent 返回明确的可恢复错误
 - 支持注册多个命名实例（`gpu-h20`、`build-box` …），见 §5.4
 
 **服务器侧零安装**——只需要有 sshd。这对"用户自己配置"是决定性优势。
+
+**测试策略**：`ssh2` 自带 `Server` 实现，测试中在进程内起一个假 sshd，
+无需 Docker 或外部依赖即可覆盖连接、执行、超时、断线、认证失败等路径。
 
 ### 5.4 `dsh-remote-registry`（远程机器配置）
 
@@ -205,7 +219,7 @@ dsh client 侧同样是 cordis 插件树：`dsh-client-runtime`（SlotRegistry +
 1. WKWebView composer → loopback HTTP → Node 内 dsh host
 2. agent loop 组装上下文（session 状态、skill、system prompt）→ 调 LLM（网络）
 3. LLM 返回 tool call `bash(nvidia-smi; tail -n 50 …)`
-4. `dsh-terminal-ssh` 从 `remote-registry` 取 `gpu-h20` 的连接，复用现有 SSH channel 执行，流式回传输出
+4. `dsh-shell-ssh` 从 `remote-registry` 取 `gpu-h20` 的连接，复用现有 SSH 连接开 exec channel 执行，流式回传输出
 5. 结果进 session（JSONL 落盘到 app 容器）→ 下一轮
 6. LLM 调 `code_runtime` 在 worker thread 里用 `pptxgenjs` 生成 .pptx，写入 app 容器
 7. 通过原生桥的 Files 导出，或直接系统分享
@@ -232,10 +246,10 @@ dsh client 侧同样是 cordis 插件树：`dsh-client-runtime`（SlotRegistry +
 
 | 周期 | 范围 | 完成标志 |
 |---|---|---|
-| **一：地基** | §5.1 Node 构建 · §5.2 mobile profile · §5.3 terminal-ssh · §5.4 remote-registry | 里程碑 1–5 全绿。此时 app 可用但 UI 是桌面布局 |
+| **一：地基** | §5.1 Node 构建 · §5.2 mobile profile · §5.3 shell-ssh · §5.4 remote-registry | 里程碑 1–5 全绿。此时 app 可用但 UI 是桌面布局 |
 | **二：手机化** | §5.6 移动 layout · §5.5 原生桥（Files / 光栅化 / 通知） | 日常可用的手机 app |
 
-周期一中，`dsh-terminal-ssh` 与 `dsh-remote-registry` 均不依赖 iOS，可在 Mac 上完整开发测试，与高风险的 Node 构建工作并行。
+周期一中，`dsh-shell-ssh` 与 `dsh-remote-registry` 均不依赖 iOS，可在 Mac 上完整开发测试，与高风险的 Node 构建工作并行。
 
 测试机器：用户已有的 GPU 机器（6×H20，公网直连，手机蜂窝网络可达）。具体地址存于 `.credentials.yaml`，不入库。
 
@@ -250,7 +264,7 @@ dsh client 侧同样是 cordis 插件树：`dsh-client-runtime`（SlotRegistry +
 
 **测试策略**：
 
-- **单元**（Mac 上跑，vitest）：`dsh-terminal-ssh` 对本地 sshd 或容器；`dsh-remote-registry` 的解析、探针分层、凭据读写
+- **单元**（Mac 上跑，vitest）：`dsh-shell-ssh` 对 `ssh2` 自带 `Server` 起的进程内假 sshd；`dsh-remote-registry` 的解析、探针分层、凭据读写
 - **profile 组合测试**：`dsh --profile mobile --dump-config` 断言禁用清单生效、工具列表不含 bash
 - **jitless 回归**：CI 中以 `node --jitless` 跑全部测试，防止引入依赖 JIT 或 WASM 的代码
 - **设备烟测**：里程碑 1–5 作为手动检查清单

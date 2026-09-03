@@ -1,5 +1,13 @@
 import { generateKeyPairSync } from 'node:crypto'
-import { Server, type Connection } from 'ssh2'
+// ssh2 是 CommonJS（无 "type" 字段、无 exports map），Node 的 cjs-module-lexer
+// 静态分析不出它的具名导出：`import { Server } from 'ssh2'` 在真实 Node ESM 下
+// 会直接抛 SyntaxError（"Named export 'Server' not found"）。vitest 走 esbuild
+// 转译会掩盖这一点，测试照样全绿，但换成 `node --experimental-strip-types`
+// 跑同一个文件就会当场炸掉。这里改成默认导入再解构；`Connection` 只作类型用，
+// 类型导入会被整个擦除，不受此限制，可以照常具名导入。
+import type { Connection } from 'ssh2'
+import ssh2 from 'ssh2'
+const { Server } = ssh2
 
 export interface FakeCommandResult {
   stdout?: string
@@ -18,11 +26,18 @@ export interface FakeSshdOptions {
   rejectAuth?: boolean
 }
 
+export interface FakeAuthAttempt {
+  method: string
+  username: string
+}
+
 export interface FakeSshd {
   port: number
   hostKeyPublic: string
   /** 记录服务器实际收到的命令，用于断言。 */
   received: string[]
+  /** 记录服务器收到的每次认证尝试，供测试断言凭据确实被送达。 */
+  authAttempts: FakeAuthAttempt[]
   close(): Promise<void>
 }
 
@@ -40,16 +55,23 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   })
   const received: string[] = []
+  const authAttempts: FakeAuthAttempt[] = []
   const openConnections = new Set<Connection>()
 
   const server = new Server({ hostKeys: [privateKey] }, (client: Connection) => {
     openConnections.add(client)
     client.on('close', () => openConnections.delete(client))
-    // 经验证：ssh2 的 Client 总是先发一轮 method 'none' 探测。这里对任何方法
-    // （含 'none'）一律 accept()，客户端在 'none' 上就直接进入 ready，完全不必
-    // 走完整的 password/publickey 协商——对假 sshd 来说这就够用了，我们不关心
-    // 凭据是否正确，只关心"认证成功 / 认证失败"两条路径。
+    // 经验证：ssh2 的 Client 总是先发一轮 method 'none' 探测。如果对 'none' 也
+    // accept()，客户端在这一轮就直接进入 ready，真正的密码/私钥永远不会被发送
+    // ——夹具看起来"认证成功"了，但完全没有证明凭据确实被传输过。这对 Task 4
+    // 要测的"连接池确实把凭据交给了 ssh2"这件事是不够的，所以这里始终拒绝
+    // 'none'，逼客户端走到真实方法（password / publickey）才会被记录和 accept。
     client.on('authentication', (auth) => {
+      authAttempts.push({ method: auth.method, username: auth.username })
+      if (auth.method === 'none') {
+        auth.reject()
+        return
+      }
       if (options.rejectAuth) auth.reject()
       else auth.accept()
     })
@@ -89,6 +111,7 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
     port,
     hostKeyPublic: publicKey,
     received,
+    authAttempts,
     close: () =>
       new Promise<void>((resolve) => {
         // 显式断开还挂着的连接，否则 server.close() 只停止接受新连接，

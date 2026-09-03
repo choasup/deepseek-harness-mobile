@@ -22,4 +22,11 @@ export {
 } from './registry.ts'
 export type { RegistryStore } from './registry.ts'
 export { PROBE_STAGES, probeMachine } from './probe.ts'
-export type { ProbeDeps, ProbeOptions, ProbeReport, ProbeStage, ProbeStageResult } from './probe.ts'
+export type {
+  FingerprintStatus,
+  ProbeDeps,
+  ProbeOptions,
+  ProbeReport,
+  ProbeStage,
+  ProbeStageResult,
+} from './probe.ts'

@@ -268,6 +268,57 @@ describe('SshConnectionPool', () => {
       expect(pool.size).toBe(1)
     })
 
+    it('C2 修复：可信首连（TOFU）后，observedFingerprintFor 返回独立探测到的同一个指纹', async () => {
+      // 之前 verifiedFingerprints 在 TOFU 时存的是 pinnedFingerprint 本身
+      // （undefined），hostVerifier 里真正算出来的指纹只活在 handshake()
+      // 的闭包里，握手一结束就没处可读——探针没法在首次连接后报出"待固定
+      // 的指纹"给用户。这里用一条独立于连接池的探测（captureHostFingerprint）
+      // 拿到 oracle 值，验证池自己报出来的观测值与其一致。
+      sshd = await startFakeSshd()
+      const expected = await captureHostFingerprint(sshd.port)
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const machine = machineFor(sshd.port)
+      expect(pool.observedFingerprintFor(machine)).toBeUndefined()
+
+      await pool.acquire(machine)
+      expect(pool.observedFingerprintFor(machine)).toBe(expected)
+    })
+
+    it('C2 修复的回归防护：同一台未固定指纹的机器连续 acquire 两次仍复用同一条连接', async () => {
+      // 把"观测到的指纹"和"这条连接是按哪个 pin 建立的"这两件事分进两张表
+      // 之前，曾经错误地把观测值直接存进后者——TOFU 下观测值是一个具体
+      // 字符串而不是 undefined，会让第二次 acquire()（要求的 pin 仍是
+      // undefined）误判成"pin 要求变了"，平白摘除重连一条刚建好的健康
+      // 连接。这里直接断言两次拿到的是同一个 Client 实例。
+      sshd = await startFakeSshd()
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const machine = machineFor(sshd.port)
+      const first = await pool.acquire(machine)
+      const second = await pool.acquire(machine)
+      expect(second).toBe(first)
+      expect(pool.size).toBe(1)
+    })
+
+    it('已固定指纹连接建立后，observedFingerprintFor 与固定值一致', async () => {
+      sshd = await startFakeSshd()
+      const fingerprint = await captureHostFingerprint(sshd.port)
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const machine = { ...machineFor(sshd.port), hostFingerprint: fingerprint }
+      await pool.acquire(machine)
+      expect(pool.observedFingerprintFor(machine)).toBe(fingerprint)
+    })
+
+    it('连接被摘除/池被清空后，observedFingerprintFor 不再返回陈旧的值', async () => {
+      sshd = await startFakeSshd()
+      pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+      const machine = machineFor(sshd.port)
+      await pool.acquire(machine)
+      expect(pool.observedFingerprintFor(machine)).toBeDefined()
+
+      await pool.disposeAll()
+      expect(pool.observedFingerprintFor(machine)).toBeUndefined()
+    })
+
     it('指纹与已固定值匹配时正常连接', async () => {
       sshd = await startFakeSshd()
       const fingerprint = await captureHostFingerprint(sshd.port)

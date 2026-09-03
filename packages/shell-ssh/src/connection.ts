@@ -69,8 +69,25 @@ export function fingerprintOfHostKey(hostKeyBlob: Buffer): string {
  */
 export class SshConnectionPool {
   private readonly clients = new Map<string, Client>()
-  /** key -> 建连时实际校验通过的指纹（未固定则为 undefined）。见 acquire() 里的复用判断。 */
+  /**
+   * key -> 这条缓存连接是**按哪个 pin 要求**建立/验证的（未固定则为
+   * undefined）。只用于 acquire() 的复用判断——"现在这次调用要求的 pin，
+   * 跟缓存连接当初满足的 pin 要求是否一致"，不是"这台主机真实的指纹"。
+   * 两者在 TOFU 时不是一回事：未固定时这里存 undefined，但握手其实已经
+   * 看到了一个具体的指纹值；那个真正观测到的值存在 observedFingerprints
+   * 里，见其注释。不要把两个用途合并成一张表——合并后同一台未固定指纹的
+   * 机器连续 acquire 两次，第二次会因为"观测值 !== undefined"被误判成
+   * "pin 要求变了"，平白摘除重连一条刚建好的健康连接。
+   */
   private readonly verifiedFingerprints = new Map<string, string | undefined>()
+  /**
+   * key -> 这条缓存连接的 hostVerifier 实际观测到的主机指纹。C2 修复：
+   * 之前只有上面那张表，TOFU 时存的是 undefined（"没有 pin 要求"），
+   * 于是握手时算出来的真实指纹只活在 handshake() 的闭包里，握手一结束
+   * 就丢了——探针需要在首次连接后把这个值报给用户去固定，而池里根本
+   * 没地方能读到它。见 observedFingerprintFor()。
+   */
+  private readonly observedFingerprints = new Map<string, string>()
   private readonly pending = new Map<string, Promise<Client>>()
   /**
    * 池自己主动关掉的连接——evict()（指纹校验触发的摘除重连、或者一场
@@ -184,6 +201,7 @@ export class SshConnectionPool {
     if (this.clients.get(key) === client) {
       this.clients.delete(key)
       this.verifiedFingerprints.delete(key)
+      this.observedFingerprints.delete(key)
     }
     // I8 修复：这是池自己决定要关掉的连接（指纹不再匹配），不是一次意外
     // 断线——标记一下，watchForDisconnect 的 'close' 处理器看到会跳过
@@ -223,7 +241,15 @@ export class SshConnectionPool {
     }
 
     const client = new SshClient()
-    await this.handshake(client, machine, pinnedFingerprint, creds)
+    // C2 修复：handshake() 现在把 hostVerifier 实际观测到的指纹带出来。
+    // 这个值单独存进 observedFingerprints（见该字段注释），不能拿它去
+    // 替换下面 verifiedFingerprints 存的 pinnedFingerprint——那张表存的是
+    // "这条连接是按哪个 pin 要求建的"，用于 acquire() 判断缓存是否还能
+    // 复用；TOFU 时两者不是一回事：pin 要求是 undefined，但观测值是一个
+    // 具体的指纹字符串，把后者错存进前者会导致同一台未固定指纹的机器
+    // 连续 acquire 两次时，第二次因为"观测值 !== undefined"而被误判成
+    // pin 要求变了，平白摘除重连一条刚建好的健康连接。
+    const observedFingerprint = await this.handshake(client, machine, pinnedFingerprint, creds)
 
     // C1 修复：池可能在这条连接握手期间被 disposeAll() 清空过。握手本身
     // 是纯粹的"连没连上"判定，不知道外面发生了什么；这里用世代号补上这个
@@ -250,8 +276,25 @@ export class SshConnectionPool {
 
     this.clients.set(key, client)
     this.verifiedFingerprints.set(key, pinnedFingerprint)
+    // handshake() 只在握手真正走到 hostVerifier 并成功 settle 时才会给出
+    // 一个定义了的值——理论上 ready 事件不可能不经过 hostVerifier 就触发，
+    // 这里仍用 `if` 而不是断言，避免 ssh2 内部实现细节变化时静默存入一个
+    // 从未出现过的 undefined 覆盖掉上一次可能还有效的观测值。
+    if (observedFingerprint) this.observedFingerprints.set(key, observedFingerprint)
     this.watchForDisconnect(client, machine, key)
     return client
+  }
+
+  /**
+   * 这条连接为该机器实际观测到的主机指纹；没有一条建立好的连接时返回
+   * undefined。TOFU（首次连接、尚未固定指纹）之后，这就是用户需要拿去
+   * 固定的那个值——Task 9 的探针（remote-registry 的 probeMachine）就是
+   * 靠它产出 `discoveredFingerprint`。已固定指纹的连接这里返回的是同一个
+   * 值（不匹配的话根本连不上，见 handshake() 的 hostVerifier），跟
+   * `machine.hostFingerprint` 一致，只是多了一条独立观测的印证。
+   */
+  observedFingerprintFor(machine: RemoteMachine): string | undefined {
+    return this.observedFingerprints.get(SshConnectionPool.keyOf(machine))
   }
 
   /**
@@ -275,19 +318,25 @@ export class SshConnectionPool {
     machine: RemoteMachine,
     pinnedFingerprint: string | undefined,
     creds: SshCredentials,
-  ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  ): Promise<string | undefined> {
+    return new Promise<string | undefined>((resolve, reject) => {
       let settled = false
       // hostVerifier 拒绝时，ssh2 报出的 error 只有 level: 'handshake'，和
       // 其他握手期错误（算法协商失败等）撞在一起分不清——用这个标志位而
       // 不是 level 字符串来判定，指纹不匹配就一定走
       // SSH_FINGERPRINT_MISMATCH 分支。
       let fingerprintMismatch = false
+      // C2 修复：hostVerifier 是唯一算过原始 host key blob 指纹的地方；
+      // 不管走的是"没有固定值，随便接受"（TOFU）还是"比对固定值"分支，
+      // 都先把这次实际观测到的指纹记下来，settle 成功时带出去给 connect()
+      // 存进 verifiedFingerprints——不然 TOFU 那条路径算出来的值只活在
+      // 这个闭包里，握手一结束就没人能再读到它。
+      let observedFingerprint: string | undefined
 
       const settle = (err?: SshError) => {
         if (settled) return
         settled = true
-        err ? reject(err) : resolve()
+        err ? reject(err) : resolve(observedFingerprint)
       }
 
       client.on('ready', () => settle())
@@ -333,10 +382,11 @@ export class SshConnectionPool {
         password: creds.password,
         readyTimeout: this.options.connectTimeoutMs ?? 15_000,
         hostVerifier: (hostKeyBlob: Buffer): boolean => {
+          observedFingerprint = fingerprintOfHostKey(hostKeyBlob)
           // 没有固定指纹：本次是可信首连（TOFU）。固定 UI 是 Task 9 的事，
           // 这里只负责"固定了就必须匹配"这一半。
           if (!pinnedFingerprint) return true
-          if (fingerprintOfHostKey(hostKeyBlob) === pinnedFingerprint) return true
+          if (observedFingerprint === pinnedFingerprint) return true
           fingerprintMismatch = true
           return false
         },
@@ -365,6 +415,7 @@ export class SshConnectionPool {
       if (this.clients.get(key) === client) {
         this.clients.delete(key)
         this.verifiedFingerprints.delete(key)
+        this.observedFingerprints.delete(key)
       }
 
       const error = this.pendingDisconnectError.get(client)
@@ -394,6 +445,7 @@ export class SshConnectionPool {
     for (const client of clients) this.intentionallyClosed.add(client)
     this.clients.clear()
     this.verifiedFingerprints.clear()
+    this.observedFingerprints.clear()
     this.pending.clear()
 
     // 之前这里只调用 client.end() 就立刻返回，disposeAll() 的 Promise 在

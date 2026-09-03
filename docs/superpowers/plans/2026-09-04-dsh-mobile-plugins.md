@@ -213,12 +213,19 @@ git commit -m "chore: pnpm workspace 骨架"
   "type": "module",
   "main": "src/index.ts",
   "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-credentials": "^0.1.1-rc.2"
+    "@deepseek-ai/dsh-credentials": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.1-rc.2"
   }
 }
 ```
+
+（`zod` 是真依赖：dsh 的 storage-domain 用 zod 4 校验表值。Task 10 的域
+schema 要用它。Task 2 本身用不到，但声明在这里避免 Task 10 再改一次包清单。）
 
 - [ ] **Step 2: 定义共享类型**
 
@@ -911,6 +918,22 @@ verifier 内的闭包标志，不能匹配 level 字符串。
 与 client 一起记录，请求的 pin 不同则驱逐重连；I2 加 `if (this.clients.get(key) === client)`；
 I3 给池加可选的 `onDisconnect(machine, error?)` 回调，并把 ready 后的 error 路由过去。
 
+**修完第一轮后，同样的两个 bug 类别在 `pending` 这张 map 上又各出现一次**——
+它没有和 `clients` 受到同等对待：
+
+| # | 问题 | 后果 |
+| --- | --- | --- |
+| C2 | `acquire()` 只在 `clients` 命中时比对指纹，**在途的 `pending` 路径不比** | 带 pin 的调用者与不带 pin 的 acquire 并发时，会拿到一条**从未按其 pin 校验过**的 TOFU 连接，且**静默成功**而非失败安全。安全控制 fail-open |
+| C3 | `pending.delete(key)` 不校验身份 | 失败的 attemptA 会删掉 attemptB 的条目，导致同一 key 开出第二条连接；一条**已完成认证**的会话能在 `disposeAll()` 后存活且无句柄可达 |
+
+**教训**：给一张 map 加了身份校验/指纹校验，要同时检查**所有持有同类状态的 map**。
+`clients` 和 `pending` 是同一份状态的两个阶段，只修一个等于没修。
+
+`onDisconnect` 的契约也要一并收紧：它会在故障时**触发两次**（`error` 一次、
+紧随的 `close` 再一次且不带错误），并且在 `evict()` 与 `disposeAll()` 这类
+**主动关闭**时也触发——驱逐场景下池子明明已有健康的替代连接却报断连。
+用 `WeakSet<Client>` 标记主动关闭 + 每客户端一次的 `notified` 守卫收敛。
+
 **B. 证明凭据真的被发送出去。** Task 3 的夹具专门为此记录了真实密码值。没有这条测试，
 一个把 `SshCredentials` 整个丢掉、硬编码密码的连接池也能通过全部用例。
 
@@ -1171,6 +1194,26 @@ git commit -m "feat(shell-ssh): 远程执行、输出截断、超时与取消"
 ---
 
 ## Task 6: `SshShellExecutor` 服务
+
+**先定一条安全语义**（实施 Task 4 期间查证 `dsh-sandbox` 后补入）：
+
+`ShellRunResult.sandbox` 是 `{ mode, denied, enforcement }`，dsh 用它告诉模型和用户
+**"这条命令是否被沙箱拦截过、约束有多完整"**。本地的 `dsh-bash-sandbox` 通过
+`ctx.sandbox`（Linux landlock / macOS sandbox-exec）真的施加约束，所以它有资格填这个字段。
+
+**SSH 执行器对远程机器不提供任何本地约束。** 因此：
+
+- **不要填 `sandbox` 字段**（它是可选的）。填 `enforcement: 'partial'` 之类是在
+  声称一个不存在的强制力——比不填更危险，因为界面会显示"已受约束"。
+- `sandboxMode` getter 返回 `undefined`，**不要返回 `danger-full-access`**——
+  那是一个描述*本地*沙箱状态的值，用在远程上是类型正确、语义错误。
+- 远程执行的真正闸门是 `dsh-user-approval`（mobile profile 里策略为 `ask`），
+  不是沙箱。这一点要在 Task 7 的插件文档里写明。
+- 目标机器名应当对模型可见，否则它不知道命令跑在哪台机器上。
+
+一句话：**宁可什么都不声称，也不要声称一个假的约束。**
+
+
 
 把前两个任务组装成 dsh 认识的服务。**动手前先读**
 `/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-shell/lib/types/index.d.ts`
@@ -1636,20 +1679,18 @@ import {
 import type { RemoteMachine } from '../../src/types.ts'
 
 function makeStore() {
-  const settings = new Map<string, unknown>()
+  const machines = new Map<string, RemoteMachine>()
   const secrets = new Map<string, string>()
   return {
-    settings,
+    machines,
     secrets,
     adapter: {
-      read: async <T>(key: string) => settings.get(key) as T | undefined,
-      write: async (key: string, value: unknown) => { settings.set(key, value) },
+      listMachines: async () => [...machines.values()],
+      putMachine: async (m: RemoteMachine) => { machines.set(m.name, m) },
+      deleteMachine: async (name: string) => { machines.delete(name) },
       readSecret: async (ref: string) => secrets.get(ref),
-      // 空值即删除——RemoteRegistry.remove 用 writeSecret(ref, '') 表达「抹掉密钥」
-      writeSecret: async (ref: string, value: string) => {
-        if (value) secrets.set(ref, value)
-        else secrets.delete(ref)
-      },
+      writeSecret: async (ref: string, value: string) => { secrets.set(ref, value) },
+      deleteSecret: async (ref: string) => { secrets.delete(ref) },
     },
   }
 }
@@ -1715,7 +1756,7 @@ describe('RemoteRegistry', () => {
     await registry.add(gpu)
     await registry.setPrivateKey('gpu-h20', 'KEY-MATERIAL')
     expect(store.secrets.get('REMOTE_KEY_GPU_H20')).toBe('KEY-MATERIAL')
-    expect(JSON.stringify([...store.settings.values()])).not.toContain('KEY-MATERIAL')
+    expect(JSON.stringify([...store.machines.values()])).not.toContain('KEY-MATERIAL')
   })
 
   it('credentialsFor 取出私钥', async () => {
@@ -1752,7 +1793,7 @@ Expected: FAIL —— 无法解析 `../../src/registry.ts`
 
 `packages/remote-registry/src/registry.ts`:
 ```ts
-import { normalizeMachine, parseRemoteUrl } from './url.ts'
+import { normalizeFingerprint, normalizeMachine, parseRemoteUrl } from './url.ts'
 // SshCredentials 定义在 types.ts（shell-ssh 也用它），这里只引用。
 import type { RemoteMachine, SshCredentials } from './types.ts'
 
@@ -1784,32 +1825,39 @@ export class DuplicateKeyRefError extends Error {
 }
 
 /**
- * 存储适配器。设置与密钥分开两条通道，因为私钥绝不能落进
- * 会被同步或导出的设置文档。接进 dsh 时由 ctx.storage 与
- * ctx.credentials 分别实现。
+ * 存储适配器。机器与密钥分开两条通道，因为私钥绝不能落进
+ * 会被同步或导出的设置文档。
+ *
+ * 形状是**逐记录**而不是"读写一整个 blob"，因为真实实现要贴合
+ * dsh 的 `ctx.storage.domain`——它给的是 KvTable（`get`/`put`/`delete`/
+ * `entries`），不是一个整块 JSON。逐记录同时也让测试假件保持平凡。
+ * 密钥侧对应 `ctx.credentials` 的 `resolve`/`set`/`unset`。
  */
 export interface RegistryStore {
-  read<T>(key: string): Promise<T | undefined>
-  write(key: string, value: unknown): Promise<void>
+  listMachines(): Promise<RemoteMachine[]>
+  putMachine(machine: RemoteMachine): Promise<void>
+  deleteMachine(name: string): Promise<void>
   readSecret(ref: string): Promise<string | undefined>
   writeSecret(ref: string, value: string): Promise<void>
+  deleteSecret(ref: string): Promise<void>
 }
 
-const MACHINES_KEY = 'remote-registry.machines'
-
 export class RemoteRegistry {
-  constructor(private readonly store: RegistryStore) {}
+  private readonly store: RegistryStore
 
-  private async all(): Promise<Record<string, RemoteMachine>> {
-    return (await this.store.read<Record<string, RemoteMachine>>(MACHINES_KEY)) ?? {}
+  // 注意：不能用参数属性（`constructor(private readonly store: ...)`）——
+  // 根 tsconfig 开了 erasableSyntaxOnly，参数属性在 Node 类型剥离下是
+  // 硬 SyntaxError，而 vitest 走 esbuild 抓不到。
+  constructor(store: RegistryStore) {
+    this.store = store
   }
 
   async list(): Promise<RemoteMachine[]> {
-    return Object.values(await this.all()).sort((a, b) => a.name.localeCompare(b.name))
+    return (await this.store.listMachines()).sort((a, b) => a.name.localeCompare(b.name))
   }
 
   async get(name: string): Promise<RemoteMachine | undefined> {
-    return (await this.all())[name]
+    return (await this.store.listMachines()).find((m) => m.name === name)
   }
 
   async byTag(tag: string): Promise<RemoteMachine[]> {
@@ -1824,21 +1872,18 @@ export class RemoteRegistry {
    */
   async add(input: RemoteMachine): Promise<void> {
     const machine = normalizeMachine(input)
-    const machines = await this.all()
-    if (machines[machine.name]) throw new DuplicateMachineError(machine.name)
-    const clash = Object.values(machines).find((m) => m.keyRef === machine.keyRef)
+    const existing = await this.store.listMachines()
+    if (existing.some((m) => m.name === machine.name)) throw new DuplicateMachineError(machine.name)
+    const clash = existing.find((m) => m.keyRef === machine.keyRef)
     if (clash) throw new DuplicateKeyRefError(machine.name, clash.name, machine.keyRef)
-    machines[machine.name] = machine
-    await this.store.write(MACHINES_KEY, machines)
+    await this.store.putMachine(machine)
   }
 
   async remove(name: string): Promise<void> {
-    const machines = await this.all()
-    const machine = machines[name]
+    const machine = await this.get(name)
     if (!machine) throw new UnknownMachineError(name)
-    delete machines[name]
-    await this.store.write(MACHINES_KEY, machines)
-    await this.store.writeSecret(machine.keyRef, '')
+    await this.store.deleteMachine(name)
+    await this.store.deleteSecret(machine.keyRef)
   }
 
   async importUrl(url: string): Promise<RemoteMachine> {
@@ -1854,11 +1899,9 @@ export class RemoteRegistry {
   }
 
   async pinFingerprint(name: string, fingerprint: string): Promise<void> {
-    const machines = await this.all()
-    const machine = machines[name]
+    const machine = await this.get(name)
     if (!machine) throw new UnknownMachineError(name)
-    machines[name] = { ...machine, hostFingerprint: fingerprint }
-    await this.store.write(MACHINES_KEY, machines)
+    await this.store.putMachine({ ...machine, hostFingerprint: normalizeFingerprint(fingerprint) })
   }
 
   async credentialsFor(machine: RemoteMachine): Promise<SshCredentials> {
@@ -2015,6 +2058,11 @@ export interface ProbeDeps {
 /**
  * 分层诊断一台机器。任一层失败即停止，后续标为 skipped——
  * 这样用户看到的是"哪一层断了"，而不是笼统的连接失败。
+ *
+ * 注意：连接池的 `verifiedFingerprints` 记的是**请求的 pin**，不是
+ * **实际观察到的主机密钥**（TOFU 时服务器出示的密钥在 hostVerifier 里
+ * 就被丢掉了）。固定指纹的界面需要"我们看到的是这个"，所以这里要
+ * 顺带把连接池改成记录观察值——一次赋值的事，但必须在本任务做掉。
  */
 export async function probeMachine(machine: RemoteMachine, deps: ProbeDeps): Promise<ProbeReport> {
   const stages: ProbeStageResult[] = []
@@ -2151,7 +2199,7 @@ export {
 } from './probe.ts'
 
 export const name = 'remote-registry'
-export const inject = ['storage', 'credentials']
+export const inject = ['storageDomain', 'credentials']
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -2159,22 +2207,64 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-export function apply(ctx: Context): void {
+/**
+ * 机器记录的 zod schema。dsh 的 storage-domain 用 zod 4 校验表值
+ * （它自己的 Config 才用 schemastery，别混）。
+ */
+const machineSchema = z.object({
+  name: z.string(),
+  host: z.string(),
+  port: z.number(),
+  user: z.string(),
+  keyRef: z.string(),
+  tags: z.array(z.string()),
+  hostFingerprint: z.string().optional(),
+  defaultWorkdir: z.string().optional(),
+})
+
+const REMOTE_DOMAIN = defineDomain({
+  name: 'remote-registry',
+  version: 1,
+  tables: { machines: domainTable<string, RemoteMachine>(machineSchema) },
+})
+
+export async function apply(ctx: Context): Promise<void> {
+  const domain = await ctx.storageDomain.open(REMOTE_DOMAIN)
+  const machines = domain.table('machines')
+
   const store: RegistryStore = {
-    read: (key) => ctx.storage.get(key),
-    write: (key, value) => ctx.storage.set(key, value),
-    readSecret: (ref) => ctx.credentials.get(ref),
-    writeSecret: (ref, value) => ctx.credentials.set(ref, value),
+    // KvTable 的读是同步的（整个域在 open 时全量载入内存），
+    // 这里包成 Promise 只为对齐 RegistryStore 的契约。
+    listMachines: async () => [...machines.entries()].map(([, m]) => m),
+    putMachine: async (m) => { await machines.put(m.name, m) },
+    deleteMachine: async (name) => { await machines.delete(name) },
+    readSecret: async (ref) => (await ctx.credentials.resolve(credentialRef(ref)))?.value,
+    writeSecret: (ref, value) => ctx.credentials.set(credentialRef(ref), value),
+    deleteSecret: (ref) => ctx.credentials.unset(credentialRef(ref)),
   }
   ctx.set('remotes', new RemoteRegistry(store))
 }
 ```
 
-`ctx.storage` 与 `ctx.credentials` 的确切方法名以本机
-`…/@deepseek-ai/dsh-storage/lib/types/index.d.ts` 与
-`…/@deepseek-ai/dsh-credentials/lib/types/index.d.ts` 为准。
-**若签名不同，改这里的适配，不要改 `RegistryStore` 接口**——
-它的形状是被 Task 8 的测试锁定的。
+**这段接线是实施 Task 4 时查证真实 `.d.ts` 得来的，最初的计划四行全错**：
+
+| 我原本以为 | 真实情况 |
+| --- | --- |
+| `ctx.storage.get/set(key, value)` | `ctx.storage` 是 `mount`/`form`/`backend` 的注册表，**根本没有 KV 方法**。KV 面在 `ctx.storageDomain.open(spec)` → `KvTable` |
+| `ctx.credentials.get(ref)` | 是 `resolve(ref)`，且返回 `{value, source}` 而非裸字符串 |
+| ref 是普通字符串 | `CredentialRef` 是**品牌类型**，必须经 `credentialRef()` 构造 |
+| 用 `writeSecret(ref, '')` 表示删除 | 有真正的 `unset(ref)`，不需要空值约定 |
+
+`inject` 也相应从 `['storage', 'credentials']` 改为 `['storageDomain', 'credentials']`。
+
+导入：
+```ts
+import z from 'zod'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
+```
+并在 `package.json` 的 `peerDependencies` 加 `@deepseek-ai/dsh-storage-domain`，
+`dependencies` 加 `zod: ^4.4.3`。
 
 - [ ] **Step 4: 跑测试确认通过**
 

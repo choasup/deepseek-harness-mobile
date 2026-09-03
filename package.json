@@ -1,0 +1,17 @@
+{
+  "name": "dsh-mobile",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.0.0",
+  "engines": { "node": "^22.19 || >=24" },
+  "scripts": {
+    "test": "vitest run",
+    "test:jitless": "node --jitless ./node_modules/vitest/vitest.mjs run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.10.0"
+  }
+}

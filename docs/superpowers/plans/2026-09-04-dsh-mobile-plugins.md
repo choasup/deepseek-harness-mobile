@@ -41,7 +41,18 @@ export class SshShellExecutor extends ShellExecutor {
 
 `ShellExecutor` 的基类构造会把自己注册到 `ctx.shell`。
 
-**4. 类型定义在本机可读。** 写代码前先读这两个文件，它们是唯一权威：
+**4. vitest 测不出真实 Node 的加载行为——这已经坑过三次。** vitest 走 esbuild 转译，
+会掩盖两类只在真实 Node 下发作的错误：
+
+| 陷阱 | 症状 | 规避 |
+| --- | --- | --- |
+| TypeScript 参数属性 `constructor(readonly x: T)` | 类型剥离下硬 `SyntaxError`，但 vitest 全绿 | 根 tsconfig 已开 `erasableSyntaxOnly`；字段声明后在构造体内赋值 |
+| CommonJS 包的具名导入 | `ssh2` 是 CJS，`import { Client } from 'ssh2'` 在真实 Node ESM 下抛 `SyntaxError: Named export not found`，vitest 却能过 | 用 `import ssh2 from 'ssh2'` 再解构；`import type` 不受影响（会被擦除） |
+
+**凡是要装进 dsh 运行的 `src/` 代码，验证时必须用真的 `node` 子进程，不能只看 vitest。**
+（探针文件要放在使用该依赖的包目录内——pnpm 严格布局下，裸标识符从 workspace 根解析不到。）
+
+**5. 类型定义在本机可读。** 写代码前先读这两个文件，它们是唯一权威：
 - `…/@deepseek-ai/dsh-shell/lib/types/types.d.ts` — `ShellExecRequest` / `ShellExecSpec` / `ShellRunResult` / `ShellProcess`
 - `…/@deepseek-ai/dsh-shell/lib/types/index.d.ts` — `ShellExecutor` 抽象类
 
@@ -454,7 +465,13 @@ Run: `pnpm install`
 `packages/shell-ssh/tests/helpers/fake-sshd.ts`:
 ```ts
 import { generateKeyPairSync } from 'node:crypto'
-import { Server, type Connection } from 'ssh2'
+// ssh2 是 CommonJS，具名导入在真实 Node ESM 下抛 SyntaxError；
+// vitest 的 esbuild 会掩盖这一点，所以别"顺手改回"具名导入。
+// 类型导入会被擦除，不受影响。
+import ssh2 from 'ssh2'
+import type { Connection } from 'ssh2'
+
+const { Server } = ssh2
 
 export interface FakeCommandResult {
   stdout?: string
@@ -478,19 +495,35 @@ export interface FakeSshd {
   hostKeyPublic: string
   /** 记录服务器实际收到的命令，用于断言。 */
   received: string[]
+  /**
+   * 记录每次认证尝试。没有它，一个把 privateKey 整个丢掉的连接池
+   * 也能通过全部测试——因为测试只能看到"连上了"。
+   */
+  authAttempts: Array<{ method: string; username: string }>
   close(): Promise<void>
 }
 
 /** 起一台进程内假 sshd，监听 127.0.0.1 的随机端口。 */
 export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<FakeSshd> {
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519', {
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  // ssh2 的密钥解析器只认 OpenSSH 新格式或 PKCS1，不认通用 PKCS8。
+  // Node 无法把 ed25519 导成 OpenSSH 格式，所以这里用 RSA + pkcs1，
+  // 否则 new Server() 直接抛 "Cannot parse privateKey: Unsupported key format"。
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   })
   const received: string[] = []
+  const authAttempts: Array<{ method: string; username: string }> = []
+  const openConnections = new Set<Connection>()
 
   const server = new Server({ hostKeys: [privateKey] }, (client: Connection) => {
     client.on('authentication', (auth) => {
+      authAttempts.push({ method: auth.method, username: auth.username })
+      // ssh2 的 Client 总是先用 method 'none' 探一次。无条件 accept 会让
+      // 连接在这一步就成功，凭据根本不会被发送——测试也就验证不了
+      // 连接池有没有真的把密钥传出去。拒掉 none，逼客户端走真方法。
+      if (auth.method === 'none') return auth.reject()
       if (options.rejectAuth) auth.reject(['publickey'])
       else auth.accept()
     })
@@ -524,7 +557,13 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
     port,
     hostKeyPublic: publicKey,
     received,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    authAttempts,
+    // server.close() 只停止接受新连接，回调要等所有现存连接关闭才触发。
+    // 测试若忘了 end 客户端就会永久挂起，所以这里显式断开。
+    close: () => new Promise<void>((resolve) => {
+      for (const conn of openConnections) conn.end()
+      server.close(() => resolve())
+    }),
   }
 }
 ```
@@ -536,7 +575,11 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
 `packages/shell-ssh/tests/unit/fake-sshd.test.ts`:
 ```ts
 import { afterEach, describe, expect, it } from 'vitest'
-import { Client } from 'ssh2'
+// ssh2 是 CommonJS：具名导入在真实 Node ESM 下抛 SyntaxError。
+// 这里虽然只跑在 vitest 里，仍统一写法，避免被复制到 src/ 时踩坑。
+import ssh2 from 'ssh2'
+
+const { Client } = ssh2
 import { startFakeSshd, type FakeSshd } from '../helpers/fake-sshd.ts'
 
 let sshd: FakeSshd | undefined
@@ -709,10 +752,15 @@ Expected: FAIL —— `Failed to resolve import "../../src/connection.ts"`
 
 `packages/shell-ssh/src/connection.ts`:
 ```ts
-import { Client } from 'ssh2'
+// ssh2 是 CommonJS：具名导入在真实 Node ESM 下抛 SyntaxError，而 vitest 能过。
+// 这份代码要装进 dsh 用真 Node 跑，所以必须默认导入再解构。
+import ssh2 from 'ssh2'
+import type { Client } from 'ssh2'
 // SshCredentials 只在 remote-registry 里定义一次；这里复用，避免两处定义漂移。
 import type { RemoteMachine, SshCredentials } from '@dsh-mobile/remote-registry'
 import { SshError } from './errors.ts'
+
+const { Client: SshClient } = ssh2
 
 export interface SshConnectionPoolOptions {
   /** 为一台机器取认证材料。 */
@@ -754,7 +802,7 @@ export class SshConnectionPool {
 
   private async connect(machine: RemoteMachine, key: string): Promise<Client> {
     const creds = await this.options.credentials(machine)
-    const client = new Client()
+    const client = new SshClient()
 
     await new Promise<void>((resolve, reject) => {
       let settled = false
@@ -829,7 +877,11 @@ git commit -m "feat(shell-ssh): SSH 连接池，含复用、断线摘除与错�
 `packages/shell-ssh/tests/unit/exec.test.ts`:
 ```ts
 import { afterEach, describe, expect, it } from 'vitest'
-import { Client } from 'ssh2'
+// ssh2 是 CommonJS：具名导入在真实 Node ESM 下抛 SyntaxError。
+// 这里虽然只跑在 vitest 里，仍统一写法，避免被复制到 src/ 时踩坑。
+import ssh2 from 'ssh2'
+
+const { Client } = ssh2
 import { execRemote } from '../../src/exec.ts'
 import { startFakeSshd, type FakeSshd } from '../helpers/fake-sshd.ts'
 
@@ -931,7 +983,7 @@ Expected: FAIL —— 无法解析 `../../src/exec.ts`
 
 `packages/shell-ssh/src/exec.ts`:
 ```ts
-import type { Client } from 'ssh2'
+import type { Client } from 'ssh2'  // 类型导入会被擦除，不受 CJS 限制
 
 export interface RemoteExecOptions {
   command: string
@@ -2103,6 +2155,20 @@ describe('构建产物', () => {
     expect(existsSync(`${pkgRoot}lib/index.js`)).toBe(true)
   })
 
+  it('shell-ssh 的产物也能被普通 Node ESM 加载', () => {
+    // shell-ssh 依赖 CommonJS 的 ssh2，最容易在这里翻车。
+    const libPath = fileURLToPath(new URL('../../../shell-ssh/lib/index.js', import.meta.url))
+    const script = `
+      const m = await import(${'${JSON.stringify(libPath)}'})
+      if (typeof m.SshShellExecutor !== 'function') throw new Error('缺少 SshShellExecutor')
+      console.log('OK')
+    `
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8',
+    })
+    expect(out.trim()).toBe('OK')
+  })
+
   it('能被普通 Node ESM 加载（dsh 就是这么加载的）', () => {
     // 关键：走真的 node 子进程，不经过 vitest 的 esbuild 转译。
     const script = `
@@ -2205,7 +2271,7 @@ Run: `pnpm -r build`
 Expected: 两个包各产出 `lib/index.js`、`lib/index.d.ts`、`lib/index.js.map`
 
 Run: `pnpm vitest run packages/remote-registry/tests/built`
-Expected: PASS，2 个用例
+Expected: PASS，3 个用例
 
 Run: `pnpm test`
 Expected: 全部通过（既有的 `src/*.ts` 单测不受影响）

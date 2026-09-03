@@ -195,7 +195,13 @@ git commit -m "chore: pnpm workspace 骨架"
 - Create: `packages/remote-registry/package.json`
 - Create: `packages/remote-registry/src/types.ts`
 - Create: `packages/remote-registry/src/url.ts`
+- Create: `packages/remote-registry/src/index.ts`（只做 re-export 的 barrel）
 - Test: `packages/remote-registry/tests/unit/url.test.ts`
+
+**排序说明**：barrel 必须在这里就建，不能拖到 Task 10。Task 4 的
+`connection.ts` 用裸标识符 `@dsh-mobile/remote-registry` 导入 `RemoteMachine`
+与 `SshCredentials`——没有 barrel 就解析不到。Task 10 只负责在 barrel 上
+追加 cordis 的 `name`/`inject`/`apply` 接线，不重建文件。
 
 - [ ] **Step 1: 建包**
 
@@ -233,6 +239,17 @@ export interface RemoteMachine {
   hostFingerprint?: string
   /** 远程默认工作目录。 */
   defaultWorkdir?: string
+}
+
+/**
+ * SSH 认证材料。定义在这里而不是 registry.ts，因为 shell-ssh 的连接池
+ * 也要用——一个类型只定义一次，避免两处漂移。
+ */
+export interface SshCredentials {
+  password?: string
+  /** ssh2 同时接受 string 与 Buffer。 */
+  privateKey?: string | Buffer
+  passphrase?: string
 }
 ```
 
@@ -496,6 +513,12 @@ export interface FakeSshd {
   /** 记录服务器实际收到的命令，用于断言。 */
   received: string[]
   /**
+   * 断开所有现存连接，但**保持监听同一端口**。
+   * 用来测"驱逐后用同一个 machine 重连"——夹具是 listen(0)，
+   * 重启会换端口，那样测不出同 key 重连。
+   */
+  disconnectAll(): void
+  /**
    * 记录每次认证尝试。没有它，一个把 privateKey 整个丢掉的连接池
    * 也能通过全部测试——因为测试只能看到"连上了"。
    */
@@ -558,6 +581,7 @@ export async function startFakeSshd(options: FakeSshdOptions = {}): Promise<Fake
     hostKeyPublic: publicKey,
     received,
     authAttempts,
+    disconnectAll: () => { for (const conn of openConnections) conn.end() },
     // server.close() 只停止接受新连接，回调要等所有现存连接关闭才触发。
     // 测试若忘了 end 客户端就会永久挂起，所以这里显式断开。
     close: () => new Promise<void>((resolve) => {
@@ -852,6 +876,49 @@ export class SshConnectionPool {
 
 注意 `close` 处理器同时承担两个职责：连接建立阶段的失败上报，和建立之后的自动摘除。`settled` 标志保证前者只触发一次，而 `this.clients.delete(key)` 每次都执行——这正是"服务器关闭后重连"那个测试要验证的行为。
 
+**还要做三件计划原文没写的事**（实施时补入）：
+
+**A. 主机密钥校验。** `SSH_FINGERPRINT_MISMATCH` 在错误枚举里声明了却从不抛出，
+等于连接池根本不验主机密钥——对一个在远程执行任意命令的工具，中间人可以静默得手。
+用 ssh2 的 `hostVerifier`：`machine.hostFingerprint` 存在则比对，不匹配**硬拒**
+（`recoverable: false`，绝不自动接受变更的主机密钥）；不存在则放行（TOFU，固定指纹是
+Task 9 的事）。指纹格式必须与 `ssh-keygen -lf` 一致（原始 key blob 的 sha256、base64、
+不带填充），否则用户粘贴的值比不上。实测确认：`hostVerifier` 收到的是**原始 key blob
+的 Buffer**，返回 `false` 后客户端报 `level: 'handshake'` 且**无 code**——所以分类要靠
+verifier 内的闭包标志，不能匹配 level 字符串。
+
+**关键安全性质**：拒绝发生在握手期，**凭据尚未发送**。中间人拿不到密码。
+（实测：拒绝时夹具记录 `errors: ['KEY_EXCHANGE_FAILED']`、`authAttempts: []`。）
+
+**指纹格式必须用独立 oracle 锁死**：测试里不能拿被测函数自己算的值去比自己，
+否则 md5 当成 sha256、hex 当成 base64 这类 bug 照样通过。断言要对
+`ssh-keygen -l -f` 子进程的真实输出。
+
+注意：`ssh-keygen -lf` **不能直接吃** 夹具的 SPKI PEM，会报
+`"is not a public key file"`（实测；复审最初的说法是错的）。要先用
+`ssh-keygen -i -m PKCS8 -f` 转成 OpenSSH 格式，转完指纹逐字节一致。
+
+**四个连接池自身的坑**（Task 4 复审发现，都是确定性可复现）：
+
+| # | 问题 | 后果 |
+| --- | --- | --- |
+| C1 | `disposeAll()` 不取消在途连接——`connect()` 在 await 之后才 `clients.set()` | 释放期间正在建立的连接会**在池已清空后复活**，泄漏一条已发送过凭据的 socket 且无句柄可达。正是 Task 7 的拆卸路径 |
+| I1 | 池的 key 是 `user@host:port`，**不含指纹** | TOFU 之后再固定指纹时，`acquire()` 直接返回那条**从未验证过**的缓存连接 |
+| I2 | `clients.delete(key)` 不校验 client 身份，而 `disposeAll` 清 map 却不摘监听器 | 半开 socket 的迟到 `close` 会驱逐掉**后来占用同一 key 的新连接** |
+| I3 | `ready` 之后的 error 被 no-op 的 `settle()` 静默吞掉 | 中途断连没有任何人收到通知 |
+
+修法：C1 用**代数计数器**（不是布尔，否则池释放后不可复用）；I1 把已验证的指纹
+与 client 一起记录，请求的 pin 不同则驱逐重连；I2 加 `if (this.clients.get(key) === client)`；
+I3 给池加可选的 `onDisconnect(machine, error?)` 回调，并把 ready 后的 error 路由过去。
+
+**B. 证明凭据真的被发送出去。** Task 3 的夹具专门为此记录了真实密码值。没有这条测试，
+一个把 `SshCredentials` 整个丢掉、硬编码密码的连接池也能通过全部用例。
+
+**C. 重连测试要测到东西。** 夹具用 `listen(0)`，重启后端口不同，所以"再 acquire 一次
+size 变 1"只证明"新加了一个 key"，不证明重连。断言应改为：驱逐后对**同一个 machine
+对象** acquire 成功，且拿到的是**不同的 Client 实例**。并在注释里写清这个测试
+证明了什么、没证明什么。
+
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/shell-ssh/tests/unit/connection.test.ts`
@@ -867,6 +934,15 @@ git commit -m "feat(shell-ssh): SSH 连接池，含复用、断线摘除与错�
 ---
 
 ## Task 5: 远程执行与输出收集
+
+**先明确与连接池的分工边界**（Task 4 复审时定的）：
+
+> `pool.acquire()` 返回的 client **只保证 acquire 那一刻是活的，不保证 exec 那一刻还活着**。
+> 连接池负责驱逐与通知（`onDisconnect` 回调），**不负责 exec 期间的存活性**。
+
+所以 `execRemote` 必须自己处理"拿到 client 时它已经死了"和"exec 途中连接断开"，
+并映射成 `SSH_DISCONNECTED`。具体表现是 `client.exec()` 的回调收到 err，
+或者 stream 在没有 exit 事件的情况下 close。两种都要覆盖测试。
 
 **Files:**
 - Create: `packages/shell-ssh/src/exec.ts`
@@ -1677,7 +1753,8 @@ Expected: FAIL —— 无法解析 `../../src/registry.ts`
 `packages/remote-registry/src/registry.ts`:
 ```ts
 import { normalizeMachine, parseRemoteUrl } from './url.ts'
-import type { RemoteMachine } from './types.ts'
+// SshCredentials 定义在 types.ts（shell-ssh 也用它），这里只引用。
+import type { RemoteMachine, SshCredentials } from './types.ts'
 
 export class DuplicateMachineError extends Error {
   constructor(name: string) {
@@ -1719,12 +1796,6 @@ export interface RegistryStore {
 }
 
 const MACHINES_KEY = 'remote-registry.machines'
-
-export interface SshCredentials {
-  privateKey?: string
-  passphrase?: string
-  password?: string
-}
 
 export class RemoteRegistry {
   constructor(private readonly store: RegistryStore) {}
@@ -2023,10 +2094,12 @@ git commit -m "feat(remote-registry): 分层连接探针"
 
 ---
 
-## Task 10: remote-registry 插件入口
+## Task 10: remote-registry 的 cordis 接线
+
+**注意**：`src/index.ts` 已在 Task 2 建好（barrel）。本任务只在其上追加 cordis 的 `name` / `inject` / `apply`，不重建文件。
 
 **Files:**
-- Create: `packages/remote-registry/src/index.ts`
+- Modify: `packages/remote-registry/src/index.ts`（在既有 barrel 上追加接线）
 - Test: `packages/remote-registry/tests/unit/index.test.ts`
 
 - [ ] **Step 1: 写失败的测试**
@@ -2069,8 +2142,8 @@ export {
   RemoteUrlError, REMOTE_URL_SCHEME, type RemoteUrlErrorCode,
 } from './url.ts'
 export {
-  RemoteRegistry, DuplicateMachineError, UnknownMachineError,
-  type RegistryStore, type SshCredentials,
+  RemoteRegistry, DuplicateMachineError, DuplicateKeyRefError, UnknownMachineError,
+  type RegistryStore,
 } from './registry.ts'
 export {
   probeMachine, PROBE_STAGES,

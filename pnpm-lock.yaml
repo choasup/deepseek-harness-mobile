@@ -73,6 +73,9 @@ importers:
       ssh2:
         specifier: ^1.16.0
         version: 1.17.0
+      tweetnacl:
+        specifier: ^0.14.5
+        version: 0.14.5
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

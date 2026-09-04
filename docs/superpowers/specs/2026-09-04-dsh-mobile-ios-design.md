@@ -49,6 +49,28 @@ iOS 第三方 app 拿不到 `dynamic-codesigning` entitlement，V8 只能以 jit
 
 **副作用（硬约束）**：jitless 模式下 `typeof WebAssembly === "undefined"`。V8 把 WASM 整个关闭。**这排除了在设备上跑 Pyodide / wasm 工具链的一切可能**，Python 只能走云端。
 
+**这条约束的波及面比原先估计的大得多（2026-09-05 补）。** 当时只考虑了它排除 Pyodide，
+没有检查我们自己的依赖链。实测发现两处：
+
+| 受影响者 | 表现 | 状态 |
+| --- | --- | --- |
+| `ssh2` | `crypto.js` 在模块加载时启动一个 WASM Poly1305 的初始化，而 `client.js`/`server.js` **无条件** `cryptoInit.then(() => proto.start())`（无 `.catch()`）。jitless 下 promise reject，`proto.start()` 永不执行——**任何 SSH 连接都无法开始**，与协商哪个 cipher 无关；rejection 无人处理还会直接终止进程 | **已解决**，见下 |
+| Node 的 `--experimental-strip-types` | 类型剥离器本身是 WASM 的，jitless 下报 `ERR_WEBASSEMBLY_NOT_SUPPORTED` | 不影响生产（发的是编译后的 `lib/*.js`），但意味着 **jitless 验证必须走构建产物** |
+
+**ssh2 的解法**：它用 WASM 只为 Poly1305 一个算法（那个模块只有 43 行胶水 + 内联
+WASM），而 `tweetnacl` 的 `lowlevel.crypto_onetimeauth` 就是纯 JS 的 Poly1305，
+并且已经在依赖树里。`@dsh-mobile/shell-ssh/jitless` 导出
+`installJitlessPoly1305()`，在 ssh2 被 require 之前往 `require.cache` 塞一个
+接口兼容的替身即可。
+
+实测（`node --jitless`、`typeof WebAssembly === 'undefined'`、并**强制协商
+`chacha20-poly1305@openssh.com`** 以确保走到该路径）：握手与远程执行都成功。
+测试里带反向对照——不打替身时同一段代码必须失败。
+
+**该入口必须与 barrel 分离**：barrel re-export `connection.ts`，后者在模块加载时
+就 import ssh2，所以"从 barrel 取这个安装函数"等于已经太晚。宿主启动代码要在
+加载 dsh 插件树之前从 `./jitless` 子路径调用它。
+
 ### 3.2 iOS 没有本地进程（架构约束）
 
 两层锁，都无法绕过：

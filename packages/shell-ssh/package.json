@@ -15,9 +15,15 @@
       "dsh-mobile-source": "./src/plugin.ts",
       "default": "./lib/plugin.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./jitless": {
+      "types": "./lib/jitless-poly1305.d.ts",
+      "default": "./lib/jitless-poly1305.js"
+    }
   },
-  "files": ["lib"],
+  "files": [
+    "lib"
+  ],
   "scripts": {
     "build": "tsdown",
     "prepare": "tsdown"
@@ -25,7 +31,8 @@
   "dependencies": {
     "ssh2": "^1.16.0",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@dsh-mobile/remote-registry": "workspace:*"
+    "@dsh-mobile/remote-registry": "workspace:*",
+    "tweetnacl": "^0.14.5"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

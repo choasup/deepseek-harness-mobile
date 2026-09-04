@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsdown'
 
 export default defineConfig({
-  entry: { index: 'src/index.ts', plugin: 'src/plugin.ts' },
+  entry: { index: 'src/index.ts', plugin: 'src/plugin.ts', 'jitless-poly1305': 'src/jitless-poly1305.ts' },
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

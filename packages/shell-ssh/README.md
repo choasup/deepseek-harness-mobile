@@ -20,7 +20,7 @@ This exists because iOS cannot fork/exec — the whole `dsh-mobile` project rout
     connectTimeoutMs: 15000     # optional: TCP + handshake timeout (default 15s)
 ```
 
-`machine` must already exist in `ctx.remotes` (`@dsh-mobile/remote-registry`) when this plugin loads — an unknown name fails the whole plugin load with `SSH_NO_MACHINE` rather than degrading. `inject: ['remotes', 'credentials']`.
+`inject: ['remotes', 'credentials']`. If `machine` does not resolve in `ctx.remotes` when this plugin mounts, `apply()` logs a `ctx.logger.warn` naming the machine and returns without registering `ctx.shell` (or the `shell-ssh:machine` system-prompt section) — it does **not** throw. This changed from an earlier design that failed the whole plugin load with `SSH_NO_MACHINE`: this plugin is normally mounted as one row inside a larger profile (see `@dsh-mobile/mobile-app`), and `@deepseek-ai/dsh-app-boot`'s `assertEntriesActivated()` treats any one enabled entry's load failure as a failure of the *entire* composed tree — so the old behavior meant a fresh profile with no machine registered yet could never boot at all, for anything, not just shell access. The new behavior keeps the rest of the composition working and leaves `ctx.shell` simply absent until a real machine is registered and the plugin is reloaded (see Known Limitations below for what "reloaded" currently requires). A consumer with a hard `inject` on `shell` (such as `@deepseek-ai/dsh-tool-bash`) then stays pending rather than activating — whether that consumer's row should ship enabled anyway is a decision for the composing profile, not this package (see `@dsh-mobile/mobile-app`'s `cordis.patch.yml`).
 
 ## Behavior
 

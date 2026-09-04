@@ -9,5 +9,5 @@
     "@dsh-mobile/remote-registry": "workspace:*",
     "@dsh-mobile/shell-ssh": "workspace:*"
   },
-  "devDependencies": { "js-yaml": "^4.2.0" }
+  "devDependencies": { "js-yaml": "^4.2.0", "@types/js-yaml": "^4.0.9" }
 }

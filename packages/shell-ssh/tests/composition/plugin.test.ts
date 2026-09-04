@@ -87,21 +87,67 @@ describe('shell-ssh 的 cordis 适配层', () => {
     await shellFiber.dispose()
   })
 
-  it('未知机器名：插件加载失败，抛出 SSH_NO_MACHINE', async () => {
+  it('未知机器名：插件正常挂载（不 throw），只是不提供 ctx.shell，并记一条 warn', async () => {
+    // 这条测试取代了原来"插件加载失败，抛出 SSH_NO_MACHINE"的断言——见
+    // plugin.ts 里 apply() 上方的大段注释：那个旧设计会让
+    // dsh-app-boot 的 assertEntriesActivated() 把这一个插件的失败变成
+    // *整棵插件树*装载失败，而这个插件在 dsh-mobile 的 mobile-app bundle
+    // 里就是一个普通 Loader 条目。新设计下，"没配置机器"必须是这一个条目
+    // 自己安静地什么都不做，而不是让它的宿主进程整个崩掉。
     const { ctx } = harness
     // 故意不 add() 任何机器。
+    const warnSpy = vi.spyOn(ctx.logger, 'warn')
 
-    let error: unknown
     const shellFiber = ctx.plugin(shellSshPlugin, { machine: 'does-not-exist' })
-    try {
-      await shellFiber
-    } catch (err) {
-      error = err
-    }
+    // 不应该 reject——apply() 正常返回。
+    await expect(shellFiber).resolves.toBeDefined()
 
-    expect(isSshError(error)).toBe(true)
-    if (isSshError(error)) expect(error.code).toBe('SSH_NO_MACHINE')
     expect(ctx.get('shell')).toBeUndefined()
+    expect(warnSpy).toHaveBeenCalledOnce()
+    // ctx.logger.warn 是 printf 风格调用（'%s' 格式串 + 单独的参数），机器名
+    // 在第二个参数上，不在格式串字面量里。
+    expect(warnSpy.mock.calls[0]).toContain('does-not-exist')
+
+    await shellFiber.dispose()
+  })
+
+  it('未知机器名时，一个硬依赖 ctx.shell 的消费者（tool-bash 的形状）保持 PENDING，既不激活也不失败', async () => {
+    // 直接验证协调者要的那句话："a tool-bash-shaped consumer injecting
+    // shell stays dormant"。@deepseek-ai/dsh-tool-bash 的真实 inject 是
+    // `["tools", "shell", "systemPrompt", "shellEnv"]`（见该包 lib/index.js），
+    // 这里只复现对本测试有意义的那一个键：`shell`。
+    //
+    // 这条测试同时划出这个新设计的边界：PENDING 本身在这个裸 cordis
+    // Context 层面是良性的——不是 FAILED，`apply()` 从未跑过、也没有抛出
+    // 任何错误。但把这一行接进真正的 `dsh --profile mobile` 时，
+    // `@deepseek-ai/dsh-app-boot` 的 `assertEntriesActivated()` 会把**任何**
+    // 已启用条目的 PENDING 状态也算作启动失败（另有独立 repro 验证，见本
+    // 任务报告）——所以这条测试只能证明"在 shell-ssh 包自己的层面，消费者
+    // 不会崩、不会报错"，不能证明"把 tool-bash 留着 enabled 就能让
+    // dsh --profile mobile 正常启动"；后者需要在 mobile-app 那份
+    // cordis.patch.yml 里单独决定。
+    const { ctx } = harness
+    const shellFiber = ctx.plugin(shellSshPlugin, { machine: 'does-not-exist' })
+    await shellFiber
+
+    const FIBER_PENDING = 0 // 跟 dsh-app-boot 编译产物里的 FIBER_PENDING 常量对齐，const enum 不能直接 import（见 erasableSyntaxOnly 的限制）。
+    const FIBER_ACTIVE = 2
+    const FIBER_FAILED = 3
+
+    const toolBashShaped = {
+      name: 'tool-bash-shaped-probe',
+      inject: ['shell'],
+      apply: vi.fn(),
+    }
+    const consumerFiber = ctx.plugin(toolBashShaped) as unknown as { state: number }
+
+    expect(consumerFiber.state).toBe(FIBER_PENDING)
+    expect(consumerFiber.state).not.toBe(FIBER_ACTIVE)
+    expect(consumerFiber.state).not.toBe(FIBER_FAILED)
+    expect(toolBashShaped.apply).not.toHaveBeenCalled()
+
+    await (consumerFiber as unknown as { dispose(): Promise<void> }).dispose()
+    await shellFiber.dispose()
   })
 
   it('机器已注册但从没设置过密钥：run() 拒绝为 SSH_NO_CREDENTIAL，不是 SSH_AUTH_FAILED', async () => {

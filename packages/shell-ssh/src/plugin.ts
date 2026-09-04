@@ -368,15 +368,53 @@ const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000
 const DEFAULT_KEEPALIVE_COUNT_MAX = 3
 
 /**
- * cordis 插件入口。`config.machine` 必须已经在 `ctx.remotes` 里注册过，
- * 否则整个插件的加载失败并抛出 `SSH_NO_MACHINE`——一个指向不存在机器的
- * shell-ssh 配置没有任何可以退化运行的方式，快速失败好过悄悄挂着一个永远
- * 报错的 `ctx.shell`。
+ * cordis 插件入口。
+ *
+ * **这条注释取代了 Task 7 原来的设计**（原文是"`config.machine` 必须已经在
+ * `ctx.remotes` 里注册过，否则整个插件的加载失败并抛出 `SSH_NO_MACHINE`——
+ * 快速失败好过悄悄挂着一个永远报错的 `ctx.shell`"）——那个设计有一个 Task 7
+ * 没有验证过的后果：这个插件是作为 dsh-mobile 的 `mobile-app` bundle 里的一
+ * 个普通 Loader 条目挂载的，`@deepseek-ai/dsh-app-boot` 的 `boot()` 在整棵
+ * 插件树装完之后会跑 `assertEntriesActivated()`——**任何一个已启用条目没有
+ * 变成 ACTIVE（哪怕只是因为它自己 `apply()` 同步 throw），整个 `dsh` 进程
+ * 都会 `exit(1)`**，不只是这一个条目失效。全新 profile 的 `remote-registry`
+ * 必然是空的，所以这里一 throw，`dsh --profile mobile` 会在任何调用
+ * （包括 `--help`）上崩溃退出，直到用户配置好一台机器——参见
+ * `packages/mobile-app/cordis.patch.yml` 里原本因此把这一行整体
+ * `disabled: true` 的注释。
+ *
+ * 新设计把"没有退化模式"这条约束落回到**只对这一个插件条目**成立，而不是
+ * 让它连累整棵树：`config.machine` 查不到时，`apply()` 正常返回（不 throw、
+ * 不挂 `ctx.shell`），只记一条 `ctx.logger.warn`。这个条目本身的 fiber 照常
+ * 变成 ACTIVE——它就是"什么都没提供"的一个安静插件，跟"没装某个可选
+ * provider"没有本质区别。Task 7 那句话真正要保的东西——"永远不要让
+ * `ctx.shell` 存在、但每次调用都报错"——这个新设计满足得更彻底：没有机器时
+ * `ctx.shell` 根本不存在，而不是存在一个必错的实现。下面的 systemPrompt 段
+ * 落注册（原来就在这之后）现在天然地跟 `ctx.shell` 的注册"同生共死"：机器
+ * 查不到时两者都不注册，模型不会被告知一套跟它实际能力对不上的远程 bash
+ * 语义。
+ *
+ * 反过来，`ctx.shell` 缺失时下游会怎样，取决于消费者自己的 inject 声明：
+ * `@deepseek-ai/dsh-tool-bash` 对 `shell` 是硬 inject（`["tools", "shell",
+ * "systemPrompt", "shellEnv"]`），缺了它整个 tool-bash 条目的 fiber 会停在
+ * PENDING——**这本身也会被 `assertEntriesActivated` 当成启动失败**（同一份
+ * repro：一个只声明 `inject: ['neverProvided']`、永远等不到那个服务的插件，
+ * `boot()` 照样 throw "N entries did not activate: ...: pending (waiting for
+ * services: ...)"）。所以 tool-bash 这一行**不能**跟这个插件一样简单地
+ * "留着但永远不激活"——是否把 tool-bash 保持 enabled，是 mobile-app 那份
+ * `cordis.patch.yml` 需要单独决定的事，取决于当时的组合里还有没有别的东西
+ * 会一直注入 `shell`；这个包本身只保证"没配置机器时不崩、不误导模型"。
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const machine = await ctx.remotes.get(config.machine)
   if (!machine) {
-    throw new SshError(`未知机器 '${config.machine}'，请先在 ctx.remotes 里注册这台机器`, 'SSH_NO_MACHINE', false)
+    ctx.logger.warn(
+      "shell-ssh: 机器 '%s' 还没有在 remote-registry 里注册，这次不会提供 ctx.shell"
+      + '——先用设置/命令行把这台机器录入 remote-registry，再重启 dsh（或者等一次配置'
+      + '热重载）让这个插件重新解析。在此之前，任何硬依赖 ctx.shell 的消费者都不会激活。',
+      config.machine,
+    )
+    return
   }
 
   const pool = new SshConnectionPool({

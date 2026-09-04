@@ -53,16 +53,21 @@ function findKeyDeep(value: unknown, key: string): boolean {
 }
 
 /** `- id: <id>` 那一行前面、跳过空行后的第一行是不是注释。 */
+/**
+ * 严格相邻：`- id: <id>` 正上方那一行本身必须是注释，中间不允许隔一个空行。
+ *
+ * 原来的版本会跳过空行去找"最近的非空行"，结果一段跟这个 id 毫无关系的
+ * 分组标题注释（比如"── A''. ……──"）只要离得够近、中间只隔了一个空行，
+ * 也会被当成"有说明"——用一次真实变异验证过这个漏洞：把 tmux-context
+ * 那条具体说明整段删空、只留上面隔着一个空行的分组标题，旧版本的检查
+ * 仍然判定"有注释"。这条测试要的是"每一个禁用条目自己带着专门的理由"，
+ * 不是"这附近某处曾经出现过一个 #"，所以改成零容忍的相邻检查。
+ */
 function hasPrecedingComment(id: string): boolean {
   const lines = patchText.split('\n')
   const target = lines.findIndex((line) => line.trim() === `- id: ${id}`)
-  if (target === -1) return false
-  for (let i = target - 1; i >= 0; i--) {
-    const trimmed = lines[i].trim()
-    if (trimmed === '') continue
-    return trimmed.startsWith('#')
-  }
-  return false
+  if (target === -1 || target === 0) return false
+  return lines[target - 1].trim().startsWith('#')
 }
 
 const MUST_DISABLE = [
@@ -146,13 +151,12 @@ describe('C. 挂上 remote-registry 与 shell-ssh，且用 /plugin 子路径', (
     expect(byId('shell-ssh')?.name).not.toBe('@dsh-mobile/shell-ssh')
   })
 
-  it('shell-ssh 默认 disabled: true——未配置机器时不会把整个 profile 拖垮', () => {
-    // 见 cordis.patch.yml 里这一行上方的大段注释：shell-ssh 的 apply() 在
-    // machine 查不到时同步 throw SSH_NO_MACHINE，会让整个插件树装载失败、
-    // `dsh --profile mobile` 直接崩溃退出。全新 profile 的 remote-registry
-    // 必然是空的，所以默认必须是禁用的，等用户自己配置好机器后在 profile
-    // 级 cordis.patch.yml 里覆盖启用。
-    expect(byId('shell-ssh')?.disabled).toBe(true)
+  it('shell-ssh 默认启用——查不到机器时它自己不再 throw，不需要靠 disabled 兜底', () => {
+    // shell-ssh 的 apply() 改过：machine 查不到时记一条 warn、正常返回，
+    // 不注册 ctx.shell，不再 throw SSH_NO_MACHINE。挂载这一行本身永远
+    // 成功，所以不需要像之前那样默认 disabled 来防止拖垮整棵插件树。
+    // 见 cordis.patch.yml 里这一行上方的大段注释。
+    expect(byId('shell-ssh')?.disabled).toBeUndefined()
   })
 
   it('remote-registry 默认不禁用——挂着一个空注册表本身不会报错，需要它随时可用', () => {

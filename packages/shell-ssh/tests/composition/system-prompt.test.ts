@@ -114,4 +114,27 @@ describe('systemPrompt 贡献不依赖挂载顺序', () => {
     await shellFiber.dispose()
     await systemPromptFiber.dispose()
   })
+
+  it('机器没配置时，systemPrompt 段落根本不会注册——不告诉模型一套它其实用不了的远程 bash 语义', async () => {
+    // 这是"新设计满足 Task 7 那条约束"的另一半：不只是不挂 ctx.shell，
+    // 连描述"命令会在远程机器 X 上跑"的这段话也不该出现——否则模型会被
+    // 告知一个跟它实际能力（这时候 ctx.shell 根本不存在）对不上的说明。
+    const { ctx } = harness
+    // 故意不 add() 任何机器。
+
+    const systemPromptFiber = ctx.plugin(SystemPrompt, {})
+    await systemPromptFiber
+
+    const shellFiber = ctx.plugin(shellSshPlugin, { machine: 'does-not-exist' })
+    await shellFiber
+
+    // 给任何可能迟到的 ctx.inject() 子 fiber 一点时间——如果它真的被
+    // 注册了，轮询会在超时前观察到；如果它没被注册（期望行为），这段
+    // 时间只是确认了"过一会儿之后仍然没有"，而不是"还没来得及"。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(await hasMachineSection(ctx)).toBe(false)
+
+    await shellFiber.dispose()
+    await systemPromptFiber.dispose()
+  })
 })

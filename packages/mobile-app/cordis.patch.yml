@@ -60,18 +60,27 @@
 # 必须和上面的执行后端一起关，否则模型的工具目录里会出现一个每次调用都失败
 # 的工具。
 
-# `tool-bash`/`tool-pwsh` 只声明对 `ctx.shell`/`ctx.pwsh` 服务名的硬依赖
-# （inject），不关心是谁提供的——理论上 `shell-ssh` 补上 `ctx.shell` 之后，
-# `tool-bash` 自己是能重新激活、跑在远程执行之上的。这里仍然保持它禁用，
-# 是因为：
-#   1）`tool-bash` 的工具描述与 `workdir` 默认值语义假设的是"这次调用的当前
-#      会话 cwd"这种本地路径身份（session.header.cwd），跟"命令实际跑在一台
-#      完全不同的远程机器、有自己独立的文件系统"这件事本身对不上，需要专门
-#      的工具文案而不是原样复用；
-#   2）更根本的原因见文件末尾"未配置机器时会发生什么"一节——`shell-ssh` 默认
-#      也是禁用的，两者的启用被设计成用户在自己的 profile 级
-#      `cordis.patch.yml` 里做的同一次改动，而不是 mobile-app bundle 单方面
-#      替用户打开一个此刻必然无法工作的工具。
+# `tool-bash` 只声明对 `ctx.shell` 服务名的硬依赖（inject），不关心是谁
+# 提供的——`shell-ssh`（见下面 C 段）现在挂载后不再在缺机器时 throw，理论上
+# 只要 `ctx.shell` 迟早出现，`tool-bash` 自己就能顺着 inject 激活、跑在远程
+# 执行之上，不需要这里手动协调。
+#
+# 但全新 profile 上 `remote-registry` 必然是空的，`ctx.shell` 因此
+# **完全不会出现**——这时候把 `tool-bash` 留着 enabled 不是"安静地晾在那不
+# 激活"：已经用 `@deepseek-ai/dsh-app-boot` 的真实 `boot()` 复现过，
+# `assertEntriesActivated()` 把**任何**已启用条目的 PENDING 状态也算作整棵
+# 树装载失败（跟 `dsh-tool-bash` 结构相同的一个最小复现：一个只声明
+# `inject: ['neverProvided']`、永远等不到那个服务的插件，`boot()` 照样
+# throw "1 entry did not activate: ...: pending (waiting for service:
+# neverProvided)"）。也就是说，把 `tool-bash` 留着 enabled 会把"崩溃"从
+# shell-ssh 挪到 tool-bash 身上，而不是真的消除它——这正是这一版改动想避免
+# 的问题，只是换了个位置复现。
+#
+# 所以这一行继续保持 disabled，直到有别的机制能在"没有机器"时也让
+# `ctx.shell` 满足 tool-bash 的 inject（同时不违反"永远不要挂一个必错的
+# ctx.shell"这条约束——两者现在互斥，还没有第三种做法）。用户配置好机器后，
+# 在自己的 profile 级 `cordis.patch.yml` 里把这一行改成 enabled 即可——不需要
+# 同时改 `shell-ssh`，那一行现在默认就是 enabled（见 C 段）。
 - id: tool-bash
   disabled: true
 
@@ -150,75 +159,54 @@
     - id: remote-registry
       name: '@dsh-mobile/remote-registry/plugin'
 
-    # 未配置机器时会发生什么，以及为什么这里默认 disabled：true
+    # 未配置机器时会发生什么（改过一版，见下方"这版为什么变了"）
     # ────────────────────────────────────────────────────────────────
-    # `shell-ssh` 的 `apply()`（`packages/shell-ssh/src/plugin.ts`，Task 7
-    # 就已经做出的既有设计，本任务不碰包源码、也不会去改它）在插件加载期间
-    # 就同步调用 `ctx.remotes.get(config.machine)`：查不到就直接
-    # `throw new SshError(..., 'SSH_NO_MACHINE', false)`，让**整个插件条目**
-    # 加载失败——这是有意为之的"没有退化模式"："一个指向不存在机器的
-    # shell-ssh 配置没有任何可以退化运行的方式，快速失败好过悄悄挂着一个
-    # 永远报错的 ctx.shell"（原文见该文件对 `apply()` 的注释）。
+    # `shell-ssh` 的 `apply()` 现在的行为：`config.machine` 在 `ctx.remotes`
+    # 里查不到时，记一条 `ctx.logger.warn`（点名机器名 + 下一步该做什么），
+    # 正常返回——不 throw，也不注册 `ctx.shell`。这一行本身因此总能挂载
+    # 成功（`disabled: true` 不再需要），全新安装的 `dsh --profile mobile`
+    # 完全正常启动：文件工具、skill、web 搜索、subagent 等等都可用，唯独
+    # `ctx.shell` 这个服务在机器配置好之前不存在。
     #
-    # 这条失败不会停在"这一个插件条目"上：`dsh-app-boot` 的
-    # `assertEntriesActivated()` 会把任何未激活的已启用条目算作整棵树装载
-    # 失败，`boot()` 收到后会 dispose 掉整个 context 并把原因包进一句
-    # `${bin}: plugin tree failed to load: ...` 往外抛，`installFailLoud`
-    # 最终把它打成一行 `fatal load failure` 写到 stderr 并 `exit(1)`。也就是
-    # 说：只要 `machine` 指向注册表里不存在的名字，`dsh --profile mobile`
-    # 这个可执行文件本身——不只是"跑一条远程命令"这一件事——会在**任何**
-    # 调用上直接崩溃退出，包括 `--help`、包括跟 shell 完全无关的任务。
+    # 这版为什么变了：原来的设计是"查不到机器就 throw SSH_NO_MACHINE，让
+    # 整个插件条目加载失败"，理由是"没有退化模式，快速失败好过悄悄挂着一个
+    # 永远报错的 ctx.shell"。但这个插件在这里只是 mobile-app bundle 里的一个
+    # 普通 Loader 条目，`@deepseek-ai/dsh-app-boot` 的 `assertEntriesActivated()`
+    # 会把**任何一个**已启用条目的加载失败算作**整棵插件树**装载失败——
+    # 已经用真实的 `boot()` 复现过：全新 profile 上 `RemoteRegistry` 必然
+    # 是空的，所以 `dsh --profile mobile` 会在**任何**调用（包括
+    # `--help`、包括跟 shell 完全无关的任务）上直接崩溃退出，直到用户配置
+    # 好一台机器。这已经不是"快速失败"，是"这个 app 在配置完成前完全没法
+    # 用"，把"没有退化模式"的范围从"这一个插件条目"错误地扩大成了"整个
+    # 进程"。新设计把这条约束收回到它该待的范围：没有机器时，`ctx.shell`
+    # 确实"没有退化模式"（不存在，不会有一个必错的实现在假装能用），但这
+    # 件事只影响需要 `ctx.shell` 的消费者，不影响其他任何东西。
     #
-    # `RemoteRegistry` 在全新 profile 上必然是空的（没有任何机器被注册
-    # 过），所以任何占位机器名（`default`、`unconfigured`……随便写哪个）在
-    # 全新安装上都会踩中同一个 `SSH_NO_MACHINE`，区别只是错误信息里的名字
-    # 变了——这不是"选一个更好的默认值"能绕开的问题。
+    # `tool-bash` 现在会怎样：见上面 A' 段——`ctx.shell` 缺失时，
+    # `tool-bash` 硬 inject 的服务没有着落，它自己的 fiber 会停在 PENDING，
+    # 而 PENDING 本身也会被 `assertEntriesActivated()` 当成启动失败（同一
+    # 招复现验证过）。所以 `tool-bash` 这一行**仍然需要**保持 disabled，
+    # 直到有机制能在没有机器时也满足它的 inject——这不是 shell-ssh 这一层
+    # 能单独解决的事，取决于 mobile-app 这份补丁自己的选择。
     #
-    # 三个选项，以及为什么选第三个：
-    #
-    #  1）照抄任务给的示例，`shell-ssh` 默认启用、`machine: default`——
-    #     后果是全新安装的 `dsh --profile mobile` 在用户完成任何设置之前
-    #     完全无法启动，包括那些跟 shell 毫无关系的功能（文件工具、
-    #     skill、web 搜索、subagent……）。"快速失败"本身没错，错的是失败
-    #     的范围：一个还没配置远程机器的用户，理应还能用这个 app 做别的
-    #     事，而不是被挡在启动画面之外。
-    #
-    #  2）参考 `@tencentcloudadp/dsh-adp` 的模式：那个包让 `AdpService` 的
-    #     构造函数完全不做网络/凭据校验，把每一个需要凭据的方法单独包一层
-    #     "resolve 失败就抛 `MISSING_CREDENTIAL`，带一句人话"（见该仓库
-    #     `src/core/service.ts` 的 `gatewayKeyRef`/`controlCredentials`
-    #     等方法），插件本身永远能挂载成功，只在真正调用时才可能失败。
-    #     这个模式在这里**技术上走不通**，不是不想选：ADP 的"永远挂载
-    #     成功"建立在"构造函数是纯赋值、不做校验"这个前提上，而
-    #     `shell-ssh` 的 `apply()` 已经是既有实现，在插件激活阶段就同步
-    #     做了 `ctx.remotes.get()` 校验并在失败时 `throw`——要拿到"挂载
-    #     成功、调用时才报错"的效果，需要改 `shell-ssh` 自己的
-    #     `apply()`（比如改成挂一个"惰性解析、真正执行前才查机器"的
-    #     `ShellExecutor`），这已经是包源码层面的改动，超出本任务"不修改
-    #     两个包源码"的边界，只能留给以后的任务判断要不要做。
-    #
-    #  3）（选择）`shell-ssh` 这一行在 bundle 里默认 `disabled: true`，
-    #     `machine` 留一个明显是占位符的值。全新安装的 `dsh --profile
-    #     mobile` 因此完全启动正常——`remotes` 注册表、文件工具、skill、
-    #     web 搜索、subagent 等等都可用，唯独没有远程 shell 执行（`tool-bash`
-    #     反正也在 A' 段默认禁用，这一点上模型侧没有任何可观察的区别）。
-    #     用户注册好一台机器之后，在自己的 profile 级
-    #     `cordis.patch.yml`（`dsh-app-boot` 文档："applied after every
-    #     bundle layer"，且带热重载）里用真实机器名覆盖 `shell-ssh` 的
-    #     `config.machine` 并把这一行和 `tool-bash` 一起
-    #     `disabled: false`——这一步失败会精确复现同一个 `SSH_NO_MACHINE`
-    #     诊断，但这时候失败的含义变了：这是用户主动做的一次"启用远程
-    #     执行"的配置改动踩了错，而不是"什么都还没做就先崩溃给用户看"。
-    #     这也是为什么 A' 段把 `tool-bash`/`tool-pwsh` 的重新启用同样描述
-    #     成"用户自己那次改动的一部分"而不是这里代劳：两者要一起打开，
-    #     一起失败或一起成功，行为才是可预期的。
+    # 已知的功能缺口：注册一台新机器目前**不会**让已经跑起来的
+    # `ctx.shell` 活过来——`apply()` 只在挂载那一刻查一次
+    # `ctx.remotes.get()`，没有订阅 `remote-registry` 底层
+    # `dsh-storage-domain` 已经在发的 `domain/changed` 事件（`domain:
+    # 'remote_registry', table: 'machines', key: <机器名>`），所以中途注册
+    # 机器需要重启 dsh（或者一次配置热重载）才能让这一行重新解析、真正
+    # 挂上 `ctx.shell`。现在还没有配机器的界面，这个"重启才生效"的缺口可以
+    # 接受；把它做成真正响应式（订阅这个已有事件，机器一出现就补挂
+    # `ctx.shell`）预计是 `shell-ssh` 包内部一处不大的改动——不需要改
+    # `remote-registry`（`domain/changed` 已经带够信息可以过滤），但需要
+    # 一次独立的实现 + 测试，这里不顺手做。
     - id: shell-ssh
       name: '@dsh-mobile/shell-ssh/plugin'
-      disabled: true
       config:
-        # 占位符，不指向任何真实机器——启用这一行前必须先用设置/命令行把一台
-        # 机器录入 `remote-registry`，再把这里的值换成那台机器的真实
-        # `name`，见上面大段注释。
+        # 全新安装时几乎肯定查不到这个名字——这是预期状态，不是配置错误：
+        # 见上面大段注释，查不到时这一行只是安静地不提供 ctx.shell。用户
+        # 注册好机器后，在自己的 profile 级 cordis.patch.yml 里把这里的值
+        # 换成那台机器的真实 name（再重启 dsh，见上面的"已知的功能缺口"）。
         machine: default
 
 # ── D. MCP：不新增行，只留一条约束说明 ────────────────────────────────

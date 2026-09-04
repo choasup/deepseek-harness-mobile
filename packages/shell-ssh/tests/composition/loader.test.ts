@@ -18,16 +18,28 @@
 // 给 'remotes'/'credentials'/'shell'/'systemPrompt' 这类跨插件共享的服务名
 // 声明了 isolate；只要 Task 12 的 mobile profile 不这么做，这条风险不会
 // 发生。
+import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { RemoteMachine } from '@dsh-mobile/remote-registry'
 import { bootStorageStack, MemoryCredentials, type StorageStack } from '../../../remote-registry/tests/mock/harness.ts'
 import { buildRemoteCommand } from '../../src/exec.ts'
 import { startFakeSshd, type FakeSshd } from '../helpers/fake-sshd.ts'
+
+// Task 11：`ctx.loader.create()` 下面按 '../../../remote-registry/lib/plugin.js'
+// 加载的是构建产物，不是这份 vitest 进程本来就在跑的 src/*.ts——不能假设
+// 别的测试文件（remote-registry/tests/build/lib.test.ts）先跑一遍把它建好；
+// vitest 的文件执行顺序不是这个文件该依赖的东西。这里显式重建一次，让这个
+// 文件单独跑（`vitest run .../loader.test.ts`）时也不依赖 lib/ 是不是已经
+// 存在、是不是跟当前 src 一致。
+const REMOTE_REGISTRY_PKG_DIR = fileURLToPath(new URL('../../../remote-registry', import.meta.url))
+const ROOT_DIR = fileURLToPath(new URL('../../../..', import.meta.url))
+const TSDOWN_BIN = join(ROOT_DIR, 'node_modules', '.bin', 'tsdown')
 
 function machine(overrides: Partial<RemoteMachine> = {}): RemoteMachine {
   return {
@@ -58,6 +70,10 @@ describe('装配层风险核查：cordis-plugin-loader 的 entry group 是否隔
   let stack: StorageStack
   let sshd: FakeSshd | undefined
 
+  beforeAll(() => {
+    execFileSync(TSDOWN_BIN, [], { cwd: REMOTE_REGISTRY_PKG_DIR, stdio: 'pipe' })
+  }, 30_000)
+
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'shell-ssh-loader-test-'))
     stack = await bootStorageStack(root)
@@ -80,7 +96,13 @@ describe('装配层风险核查：cordis-plugin-loader 的 entry group 是否隔
 
     // 两个条目都是 Loader 的顶层子条目，互为兄弟——真实 dsh profile 里
     // 插件也是这样按名字列出来的，不是靠手写 ctx.plugin() 拼起来的。
-    await ctx.loader.create({ name: '../../../remote-registry/src/plugin.ts', config: {} })
+    //
+    // Task 11：这里指向构建产物 lib/plugin.js，不再是 src/plugin.ts——
+    // `ctx.loader.create()` 内部做的是一次原始 `import()`，绕开了 vitest
+    // 的 transform；dsh 真实加载的就是 package.json `exports` 指向的
+    // lib/ 产物（main=lib/index.js），不是源码。指向构建产物才是这个
+    // 测试真正要覆盖的装配路径。
+    await ctx.loader.create({ name: '../../../remote-registry/lib/plugin.js', config: {} })
     await ctx.loader.await()
 
     // remote-registry 的插件条目已经跑完 apply()，ctx.remotes 应该已经
@@ -119,7 +141,8 @@ describe('装配层风险核查：cordis-plugin-loader 的 entry group 是否隔
     // 建一个 group 条目，remote-registry 的插件条目挂在它下面——用它自己
     // 返回的 id 作为后续 create() 的 parent 参数。
     const groupId = await ctx.loader.create({ name: 'cordis:group', config: [] })
-    await ctx.loader.create({ name: '../../../remote-registry/src/plugin.ts', config: {} }, groupId)
+    // Task 11：同上，指向构建产物 lib/plugin.js，不再是 src/plugin.ts。
+    await ctx.loader.create({ name: '../../../remote-registry/lib/plugin.js', config: {} }, groupId)
     await ctx.loader.await()
 
     expect(ctx.remotes).toBeDefined()

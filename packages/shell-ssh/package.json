@@ -2,10 +2,25 @@
   "name": "@dsh-mobile/shell-ssh",
   "version": "0.1.0",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./plugin": "./src/plugin.ts"
+    ".": {
+      "types": "./lib/index.d.ts",
+      "dsh-mobile-source": "./src/index.ts",
+      "default": "./lib/index.js"
+    },
+    "./plugin": {
+      "types": "./lib/plugin.d.ts",
+      "dsh-mobile-source": "./src/plugin.ts",
+      "default": "./lib/plugin.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "scripts": {
+    "build": "tsdown",
+    "prepare": "tsdown"
   },
   "dependencies": {
     "ssh2": "^1.16.0",

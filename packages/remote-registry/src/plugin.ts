@@ -24,8 +24,17 @@ declare module '@deepseek-ai/cordis' {
  * 机器记录的 zod schema。dsh 的 storage-domain 用 zod 4 校验表值
  * （它自己的 Config 才用 schemastery，别混）。
  */
+// Task 7 复审 I3：`port: z.number()` 单独放着没有范围/整数约束时，一条
+// 绕开 normalizeMachine（手改磁盘 json、未来的迁移脚本、直接调用
+// putMachine）到达这里的记录可以带一个非法端口（0、负数、非整数、超过
+// 65535）——`RemoteRegistry.add()`/`importUrl()` 这两条正常入口都会先过
+// `normalizeMachine()`（url.ts 已经在做同样的 int + [1, 65535] 校验），
+// 但域在 open() 时重新载入快照走的是这份 schema，不是 normalizeMachine。
+// 一个这样的记录会一路撑到 shell-ssh 的 `client.connect()`，在那里同步
+// 抛出 `ERR_SOCKET_BAD_PORT`——收紧到跟 normalizeMachine 完全一致的范围，
+// 把这类记录挡在域重新载入快照（或任何绕开 add() 的写入）的那一刻。
 const machineSchema = z.object({
-  name: z.string(), host: z.string(), port: z.number(), user: z.string(),
+  name: z.string(), host: z.string(), port: z.number().int().min(1).max(65535), user: z.string(),
   keyRef: z.string(), tags: z.array(z.string()),
   hostFingerprint: z.string().optional(), defaultWorkdir: z.string().optional(),
 })

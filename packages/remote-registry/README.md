@@ -1,0 +1,23 @@
+# @dsh-mobile/remote-registry
+
+Registry of user-configured remote machines (`ctx.remotes`) plus a layered connection probe (`tcp → credential → handshake → os → gpu`) for diagnosing why one isn't reachable. This package owns machine metadata, URL parsing/normalization, and credential *separation* (a machine record never carries a private key); it does not itself speak SSH — `@dsh-mobile/shell-ssh` supplies the actual transport, both for `ctx.shell` and for this package's probe.
+
+## Exports
+
+- `.` — pure barrel: `RemoteMachine`, `SshCredentials`, `RemoteRegistry`, URL helpers (`parseRemoteUrl`/`formatRemoteUrl`/`normalizeMachine`/`keyRefForName`/`normalizeFingerprint`), error types (`MissingCredentialError`, `DuplicateMachineError`, `DuplicateKeyRefError`, `UnknownMachineError`) and their type guards, `probeMachine`/`ProbeDeps`/`ProbeReport`. Zero runtime dependency on cordis, zod, dsh-storage-domain, or dsh-credentials — safe for a consumer that only wants a type guard.
+- `./plugin` — the cordis wiring (`name`, `inject`, `apply`), plus `CredentialShadowedError`/`isCredentialShadowedError`. This is the only file with a real dependency on `zod`, `@deepseek-ai/dsh-storage-domain`, and `@deepseek-ai/dsh-credentials`.
+
+## Behavior
+
+- **`ctx.remotes` is `RemoteRegistry`** — `list()`/`get()`/`byTag()`/`add()`/`remove()`/`importUrl()`/`setPrivateKey()`/`pinFingerprint()`/`credentialsFor()`. `inject: ['storageDomain', 'credentials']`.
+- **A machine record and its private key live in two different stores.** The record (host/port/user/tags/fingerprint) is a `KvTable` entry in a `dsh-storage-domain` table; the key is a `dsh-credentials` secret addressed by `keyRef`, a name mechanically derived from the machine's `name` (`keyRefForName`) — never independently settable, so it can't drift from what `add()` computed.
+- **Two distinguishable "can't authenticate" failures.** `credentialsFor()` throws `MissingCredentialError` when `setPrivateKey()` was never called for that machine — distinct from a wrong-but-present key, which is `shell-ssh`'s `SSH_AUTH_FAILED`. Consumers use `isMissingCredentialError()`, not `instanceof`, across the package boundary.
+- **A credential ref can be shadowed by a layer this package's `unset()` can't reach** — an inherited process environment variable (read-only) or a project/user `.env` fallback (writable-looking but `unset()`-immune). Both surface as `CredentialShadowedError` rather than a silent no-op, because `describe()` can't prove the managed store underneath is actually empty; see `plugin.ts`'s doc comment on `remove()`/`add()` for the exact sequencing this protects.
+- **Records are schema-validated on every load, not just on write.** `add()`/`importUrl()` normalize and range-check before writing (`normalizeMachine`, including `port` as an integer in `[1, 65535]`), but a record reaching storage some other way (a hand-edited JSON file, a future migration) only meets the domain's `machineSchema` at `open()`/reload time — which is why that schema mirrors `normalizeMachine`'s constraints rather than being looser. A record that skipped both checks would otherwise reach `shell-ssh`'s `client.connect()` and fail there with a much less useful diagnosis.
+- **The probe's dependencies are assembled elsewhere, on purpose.** `ProbeDeps` (`tcpReachable`/`credentialSource`/`sshHandshake`/`exec`) has no implementation in this package — `sshHandshake`/`exec` need `shell-ssh`'s connection pool, and this package cannot depend on `shell-ssh` without creating a cycle (`shell-ssh` already depends on this package for `RemoteMachine`/`RemoteRegistry`). `shell-ssh`'s `./plugin` export (`createProbeDeps`/`probeConfiguredMachine`) is where the real implementation lives.
+
+## Known Limitations and Deferred Work
+
+- **No transport of its own.** This package cannot probe or connect to anything by itself; it is inert without `shell-ssh` (or an equivalent) supplying `ProbeDeps`.
+- **`RemoteRegistry`'s multi-step operations (`add()`, `remove()`) are not atomic.** Two calls that both read-then-write can interleave on a single event loop without any real concurrency; `registry.ts`'s doc comments on `add()`/`remove()` spell out the ordering chosen to fail toward an orphaned key record rather than a silently misattributed one, and what a truly atomic fix would need from the storage layer (`KvTable.update()`).
+- **A password/passphrase credential channel is not implemented** — `credentialsFor()` only ever returns `privateKey`; `SshCredentials.password`/`.passphrase` exist on the type for `shell-ssh`'s sake but this registry has no setter for them yet.

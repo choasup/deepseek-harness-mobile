@@ -10,11 +10,32 @@ import { isSshError, SshError } from './errors.ts'
 
 const { Client: SshClient } = ssh2
 
+/**
+ * 判定 `Client#connect()` 的同步抛出是不是"privateKey 用不了"这一类——
+ * 见 handshake() 里对这条正则的用法与详细注释（Task 7 二审 I3）。
+ */
+const PRIVATE_KEY_ERROR_RE = /privateKey/i
+
 export interface SshConnectionPoolOptions {
   /** 为一台机器取认证材料。 */
   credentials(machine: RemoteMachine): Promise<SshCredentials>
   /** TCP + 握手的总超时，默认 15 秒。 */
   connectTimeoutMs?: number
+  /**
+   * ssh2 自身的存活探测间隔（毫秒）。未设置或 0 时沿用 ssh2 的默认值——
+   * 关闭。Task 7 复审 M2：黑洞连接（手机从 Wi-Fi 切到蜂窝网络时对端不再
+   * 响应任何东西，但本地 socket 表面上还"活着"）在关闭 keepalive 的情况下
+   * 永远不会自己触发 'error'/'close'——唯一能发现它已经死了的时机是"下
+   * 一次真的往这条连接上发数据"（比如下一次 exec()），而 exec.ts 的
+   * channel-open 超时只覆盖单次调用，连接本身在两次调用之间可以无限期地
+   * 假装健康。设了这个值之后，ssh2 会按周期发 keepalive 包，连续
+   * `keepaliveCountMax` 次没有回应就主动判定连接已死、触发
+   * 'error'/'close'——池照常摘除它（走 watchForDisconnect 已有的路径，
+   * 不需要额外代码），下次 acquire() 重新连接。
+   */
+  keepaliveInterval?: number
+  /** 连续多少次 keepalive 没有回应就判定连接已死。ssh2 自己的默认值是 3。 */
+  keepaliveCountMax?: number
   /**
    * 一条已经 ready 过的连接后来断线或出错时的通知钩子。池只负责"摘除+
    * 上报"，不负责"通知谁去重连"——重连是下一次 acquire() 自然发生的事。
@@ -378,27 +399,51 @@ export class SshConnectionPool {
       // 过（见本文件对应的单测），且读过 ssh2 1.17.0 的 client.js 源码确认
       // 原因：`parseKey(this.config.privateKey, cfg.passphrase)` 发生在
       // 创建 socket 之前，是纯本地校验，从不触发任何事件。至少两种真实
-      // 场景会走到这里，两者是同一个 throw 语句：
+      // 场景会走到这里，两者是同一个 throw 语句（client.js:261）：
       //   1. 密钥格式不对（贴错成 PuTTY .ppk、复制时截断、整段不是密钥）；
       //   2. 密钥加密了但没给 passphrase，或者 passphrase 给错了——
       //      parseKey() 内部解密失败时返回一个 Error，这里的代码原样
       //      `throw new Error('Cannot parse privateKey: ' + ...)`，跟纯格式
       //      错误共用同一个错误文案前缀，这里没法（也不需要）进一步区分。
-      // 紧接着还有一个独立的同步 throw：密钥解析成功、但只含公钥部分
-      // （`getPrivatePEM() === null`，比如手滑存成了 .pub 文件的内容）。
-      // 两个 throw 都发生在 socket 创建之前（`this._sock = ...` 是后面才
-      // 赋值的），所以不需要额外清理任何 socket——这条路径上从来没有过
-      // 网络层的东西可清。
+      // 紧接着还有一个独立的同步 throw（client.js:267）：密钥解析成功、但
+      // 只含公钥部分（`getPrivatePEM() === null`，比如手滑存成了 .pub
+      // 文件的内容）。这两个 throw 都发生在 socket 创建之前（client.js:290
+      // 才 `this._sock = ...`），所以不需要额外清理任何 socket——这条路径
+      // 上确实没有网络层的东西可清。
       //
-      // 不接住的话，这个裸 Error 直接从 handshake() 冒泡出去，绕过
-      // Tasks 6/7 靠 isSshError 做的错误路由，把"用户存的密钥有问题"——这
-      // 整条链路里用户最可能犯的错——归到"未分类错误"分支，恰恰是提示最
-      // 没用的那一种。分类成 SSH_AUTH_FAILED 而不是 SSH_NO_CREDENTIAL：
-      // 后者是"压根没配密钥"，这里是"配了，但用不了"，两者要求用户做
-      // 完全不同的事（去配一把 vs 去修这一把），必须保持可区分——这正是
-      // Task 6 花一整轮才分清楚的两个 code，这里不能又混到一起。
-      // `recoverable: false`：本地重放同一把解析不出来的 key 不会有不同
-      // 结果，值得重试的是"换一把 key"，不是"再试一次"。
+      // Task 7 二审 I3 修正：**这条"没有网络层东西可清"的结论只对这两个
+      // throw 成立**——最初这里把整个 `client.connect({...})` 调用包进
+      // try/catch，隐含地假设"这次调用里任何同步抛出都是私钥的问题"，但
+      // 这个调用内部在校验完 privateKey 之后还会继续往下走，同步调用
+      // `sock.connect(...)`（client.js:1129 一带的 `doConnect()`）——传入
+      // 一个非法端口号（比如 0 或负数）时，Node 的 `net.Socket#connect()`
+      // 会同步抛出 `ERR_SOCKET_BAD_PORT`，这时 `this._sock` 已经存在，
+      // `_readyTimeout` 也已经被 `startTimeout()` 挂上了定时器。原来的
+      // catch 分支不分青红皂白地把这类错误也归类成"私钥无法使用"，是一个
+      // 主动性的错误诊断——真正的原因是机器记录里的端口不合法，用户会被
+      // 指向去检查一把好端端的密钥。
+      //
+      // 这里改成按错误文案分流：只有真的提到 privateKey 的两种情况才归类
+      // 成 SSH_AUTH_FAILED；其余同步抛出（目前已知的例子是 sock.connect()
+      // 校验参数）归类成 SSH_UNREACHABLE（可恢复——这一类问题的性质更接近
+      // "这次没连上"，跟真正的网络不可达用同一个分类，不单独发明一个新
+      // code），原始文本照样带上。至于 `_sock`/`_readyTimeout` 在这条分支
+      // 下会不会真的泄漏：不会造成资源泄漏（Node 校验非法端口发生在真正
+      // 创建底层 fd 之前），但那个 15 秒的 `_readyTimeout` 定时器确实会在
+      // 未来某一刻触发、往这个已经被放弃的 `client` 上发一次迟到的
+      // 'error'——这正是 handshake() 里"settle 之后监听器仍然留着"这个
+      // 设计本来就要吞掉的那类噪声（见 handshake() 顶部注释），`settled`
+      // 挡住重复处理，不需要额外处理。
+      //
+      // 不接住私钥这两种抛出的话，裸 Error 会直接从 handshake() 冒泡出去，
+      // 绕过 Tasks 6/7 靠 isSshError 做的错误路由，把"用户存的密钥有
+      // 问题"——这整条链路里用户最可能犯的错——归到"未分类错误"分支，恰恰
+      // 是提示最没用的那一种。分类成 SSH_AUTH_FAILED 而不是
+      // SSH_NO_CREDENTIAL：后者是"压根没配密钥"，这里是"配了，但用不了"，
+      // 两者要求用户做完全不同的事（去配一把 vs 去修这一把），必须保持
+      // 可区分——这正是 Task 6 花一整轮才分清楚的两个 code，这里不能又
+      // 混到一起。`recoverable: false`：本地重放同一把解析不出来的 key
+      // 不会有不同结果，值得重试的是"换一把 key"，不是"再试一次"。
       try {
         client.connect({
           host: machine.host,
@@ -408,6 +453,8 @@ export class SshConnectionPool {
           passphrase: creds.passphrase,
           password: creds.password,
           readyTimeout: this.options.connectTimeoutMs ?? 15_000,
+          keepaliveInterval: this.options.keepaliveInterval,
+          keepaliveCountMax: this.options.keepaliveCountMax,
           hostVerifier: (hostKeyBlob: Buffer): boolean => {
             observedFingerprint = fingerprintOfHostKey(hostKeyBlob)
             // 没有固定指纹：本次是可信首连（TOFU）。固定 UI 是 Task 9 的事，
@@ -420,11 +467,21 @@ export class SshConnectionPool {
         })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
+        if (PRIVATE_KEY_ERROR_RE.test(message)) {
+          settle(
+            new SshError(
+              `机器 '${machine.name}' 配置的私钥无法使用（本地解析失败，还没有连上服务器）：${message}`,
+              'SSH_AUTH_FAILED',
+              false,
+            ),
+          )
+          return
+        }
         settle(
           new SshError(
-            `机器 '${machine.name}' 配置的私钥无法使用（本地解析失败，还没有连上服务器）：${message}`,
-            'SSH_AUTH_FAILED',
-            false,
+            `连不上 ${machine.name} (${machine.host}:${machine.port})：${message}`,
+            'SSH_UNREACHABLE',
+            true,
           ),
         )
       }

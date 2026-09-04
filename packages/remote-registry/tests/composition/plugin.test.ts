@@ -289,4 +289,37 @@ describe('remote-registry 的 cordis 接线', () => {
     await stack.dispose()
     await rm(i1Root, { recursive: true, force: true })
   })
+
+  // ---------------------------------------------------------------------
+  // shell-ssh 协调者二审 I3：`port: z.number()` 单独放着接受任何数字——一条
+  // 绕开 normalizeMachine（手改磁盘 json、未来的迁移脚本、直接调用
+  // putMachine）到达这里的记录可以带一个非法端口，一路撑到 shell-ssh 的
+  // `client.connect()`，在那里同步抛出 `ERR_SOCKET_BAD_PORT`。收紧到跟
+  // url.ts 的 normalizeMachine 完全一致的 `.int().min(1).max(65535)`，
+  // 把这类记录挡在域重新载入快照的那一刻，而不是等到真的去连它才发现。
+  // ---------------------------------------------------------------------
+
+  it('I3 回归：磁盘上手改出一个越界端口时，域重新加载响亮失败，而不是悄悄把它载入内存', async () => {
+    const { ctx, root: dir } = harness
+    await ctx.remotes.add(machine())
+
+    const raw = await readFile(join(dir, 'remote_registry.json'), 'utf8')
+    const document = JSON.parse(raw) as { tables: { machines: Record<string, RemoteMachine> } }
+    document.tables.machines['gpu-h20']!.port = 70000
+    await writeFile(join(dir, 'remote_registry.json'), JSON.stringify(document, null, 2), 'utf8')
+
+    await expect(harness.remount()).rejects.toThrow()
+  })
+
+  it('I3 回归：磁盘上手改出一个非整数端口时，域重新加载同样响亮失败', async () => {
+    const { ctx, root: dir } = harness
+    await ctx.remotes.add(machine())
+
+    const raw = await readFile(join(dir, 'remote_registry.json'), 'utf8')
+    const document = JSON.parse(raw) as { tables: { machines: Record<string, RemoteMachine> } }
+    document.tables.machines['gpu-h20']!.port = 22.5
+    await writeFile(join(dir, 'remote_registry.json'), JSON.stringify(document, null, 2), 'utf8')
+
+    await expect(harness.remount()).rejects.toThrow()
+  })
 })

@@ -46,17 +46,30 @@ export interface Config {
    * 值"）。留空则使用 `DEFAULTS.liveBufferMaxBytes`。
    */
   liveBufferMaxBytes?: number
+  /**
+   * 覆盖连接池的 TCP+握手总超时（见 connection.ts 里
+   * `SshConnectionPoolOptions.connectTimeoutMs` 的文档，池自己的默认值是
+   * 15 秒）。留空则使用连接池的默认值。
+   *
+   * 复审 M1：跟 `liveBufferMaxBytes` 同一类需求——手机在蜂窝网络上，延迟
+   * 更高也更容易抖动，15 秒这个桌面场景下的默认值不一定适合 Task 12 的
+   * mobile profile（可能想调大避免正常的高延迟被误判成连不上，也可能想
+   * 调小让用户在设置页更快看到反馈）。具体数值属于 Task 12 的判断范围，
+   * 这里只负责让它可配置，不替 Task 12 预先选一个值。
+   */
+  connectTimeoutMs?: number
 }
 
 // `z<Config>` 这个写法（`z` 既是值又是类型）是 dsh 自己包里的既有约定，见
 // dsh-storage-domain/dsh-storage-json 的 `export declare const Config: z<Config>`。
-// `liveBufferMaxBytes` 不调用 `.required()`——同 dsh-bash-local 自己 Config
-// 里 `cwd: z.string()` 的写法一致（该字段在其接口里也是 `cwd?: string`）：
+// 两个字段都不调用 `.required()`——同 dsh-bash-local 自己 Config 里
+// `cwd: z.string()` 的写法一致（该字段在其接口里也是 `cwd?: string`）：
 // schemastery 的字段默认就是"可以整个不给"，不需要（也没有）一个显式
 // `.optional()` 方法。
 export const Config: z<Config> = z.object({
   machine: z.string(),
   liveBufferMaxBytes: z.number(),
+  connectTimeoutMs: z.number(),
 })
 
 function describeError(err: unknown): string {
@@ -222,6 +235,32 @@ interface SystemPromptLike {
 }
 
 /**
+ * Task 7 复审 I1 的渲染逻辑：把一个带 partial 输出的 `SshError` 变成一段
+ * 人类/model 都能读的文本——见 `run()` 上的文档注释，这是那个缺口的落地
+ * 实现，不是新增信息源。
+ *
+ * 重试建议基于 `started` 而不是 `recoverable`：`recoverable` 对 model 不
+ * 可见（同样只有 `.message` 会被渲染），而且 `SSH_DISCONNECTED` 的
+ * `recoverable` 恒为 `true`（"连接本身"这一层值得重试）——但那不等于"这条
+ * 具体命令"安全重试：一条非幂等命令可能已经在断线前半途生效。`started`
+ * 才是回答"这条命令能不能安全重试"的字段（见 errors.ts 的文档）。
+ */
+function renderDisconnectMessage(err: SshError): string {
+  const parts = [err.message]
+  if (err.started === true) {
+    parts.push(
+      'This command had already reached the remote host and may have partially executed'
+      + ' — do not retry it automatically.',
+    )
+  } else if (err.started === false) {
+    parts.push('This command never reached the remote host — retrying is safe.')
+  }
+  if (err.partialStdout) parts.push(`[stdout before disconnect]\n${err.partialStdout}`)
+  if (err.partialStderr) parts.push(`[stderr before disconnect]\n${err.partialStderr}`)
+  return parts.join('\n\n')
+}
+
+/**
  * cordis 适配层：把 Task 6 的 `SshShellExecutor` 包成真正 `extends
  * ShellExecutor` 的子类，在这一层做类型对齐——`SshShellExecutor` 自己故意
  * 不 extends ShellExecutor（见 index.ts 顶部注释：真的继承需要一个真
@@ -232,31 +271,14 @@ interface SystemPromptLike {
  * 对齐成真正的 `ShellExecSpec`（`sandboxPolicy` 是必填字段，即使值允许是
  * undefined）。
  *
- * ## `dshEnv` 缺口——刻意不在这里补上
- *
- * `ShellExecRequest.dshEnv` 的文档要求："Executors discard ambient `DSH_*`
- * entries before merging this snapshot last"——正确实现需要这个执行器记住
- * 上一次调用往远端 export 过哪些 `DSH_*` key，下一次调用前先把不在最新快照
- * 里的那些 key 显式 `unset` 掉，再 export 当前快照。`SshShellExecutor`
- * （Task 6）已经论证过它自己做不到这件事：它按每次调用组装一条命令字符串，
- * 不持有跨调用的会话状态。这个适配层的实例确实是跨调用持久的（同一个
- * `CordisSshShellExecutor` 实例服务这个插件生命周期内的所有调用），理论上
- * 可以在这一层加一份"上次 export 过哪些 key"的记录——但要真正生效，还需要
- * 一种"unset 一批 key"的命令拼装方式，而 `exec.ts` 的 `buildRemoteCommand()`
- * 只支持 `export KEY=value`，没有对应的 unset 通道；补一个只在这个适配层
- * 里独立拼接 unset 语句、绕开 `buildRemoteCommand()` 已经验证过的引用转义
- * 逻辑，是重新发明一套不受测试覆盖的拼接代码，风险比不做更大。
- *
- * 因此这里的决定沿用 Task 6：**不读取、不转发 `request.dshEnv`**——既不做
- * "只导出、从不清理"的半吊子合并（那会悄悄违反契约的后一半，且看起来像
- * 已经支持），也不假装这个字段被处理了。`request` 传给 `this.inner.resolve()`
- * 时是按 `ExecRequestLike`（没有 `dshEnv` 字段）的结构类型消费的，多出来的
- * `dshEnv` 字段被结构类型规则原样忽略，编译期不会报错——这正是 index.ts
- * 顶部注释点名的"结构类型换来的沉默丢失"。model 端能感知的效果是：通过
- * `DSH_*` 变量传递的、只在本机进程里可见的运行时事实（比如会话 id）对经
- * SSH 执行的命令不可见。这条限制记在这里，供 Task 11/12 组装真实 profile
- * 时判断是否可接受，也是 Before You Begin 里明确要求"deliberately decide"
- * 的那个决定。
+ * `dshEnv` 缺口：`request.dshEnv` 既不读也不转发——`ExecRequestLike` 结构
+ * 类型上没有这个字段，多出来的字段被原样忽略，编译期不报错。这是刻意的
+ * 决定，不是疏漏：正确实现需要在这一层记住上一次调用往远端 export 过哪些
+ * `DSH_*` key、下一次调用前先 `unset` 掉不在最新快照里的那些，但
+ * `exec.ts` 的 `buildRemoteCommand()` 没有 unset 通道，补一个只在这里
+ * 独立拼接、绕开已验证过的引用转义逻辑的 unset 语句风险比不做更大。完整
+ * 推理和 model 端能感知的效果见本包 README 的 "Known Limitations" 一节，
+ * 不在这里重复。
  */
 class CordisSshShellExecutor extends ShellExecutor {
   private readonly inner: SshShellExecutor
@@ -280,18 +302,70 @@ class CordisSshShellExecutor extends ShellExecutor {
     return { ...spec, sandboxPolicy: undefined }
   }
 
-  run(spec: ShellExecSpec): Promise<ShellRunResult> {
-    // 连接丢失时 inner.run() reject——这正是 ShellExecutor 的文档契约
-    // ("rejects only for infrastructure failures")，原样向上传播，不在
-    // 这一层吞掉或者改写成一个编造的 ShellRunResult。见 index.ts 里
-    // `SshShellExecutor.run()` 的文档注释。
-    return this.inner.run(spec)
+  /**
+   * Task 7 复审 I1：连接丢失时 `inner.run()` reject——这正是 `ShellExecutor`
+   * 的文档契约（"rejects only for infrastructure failures"），继续原样向上
+   * 传播，不在这一层吞掉或者改写成一个编造的 `ShellRunResult`（见 index.ts
+   * 里 `SshShellExecutor.run()` 的文档注释）。
+   *
+   * 但"原样传播"曾经是字面意义上的"什么都不做"——`SshError` 上真实携带的
+   * `partialStdout`/`partialStderr`（execRemote() 断线前已经收集到的输出，
+   * Task 5 特意花力气保留下来的那份"构建打印了 200 行然后掉线"的数据）
+   * 从来没有被任何读者看到过：`dsh-tool-bash` 对 `ctx.shell.run(...)` 的
+   * 调用没有 try/catch（`dsh-tool-bash/lib/index.js` 里那次 `await` 是
+   * 裸的），`dsh-tools` 对工具调用抛出的异常只读 `.message` 去渲染给
+   * model（`dsh-tools/lib/index.js` 的文档原话："Error instances use
+   * `.message`"）——两者叠加意味着这两个字段以前只活在错误对象上，从未
+   * 被渲染过、从未被 model 看到过。测试当时断言 `err.partialStdout` 这个
+   * 字段本身存在，证明了"数据没丢"，但没证明"数据被看到了"，这正是这个
+   * 缺口曾经看起来像已经做完的原因。
+   *
+   * 现在改成：`isSshError` 且真的带了非空的 partial 输出时，把原始
+   * message、一句根据 `started` 得出的重试建议、以及打了标签的 partial
+   * 输出，一起烧进新抛出的 `SshError` 的 `message` 里——message 是这条
+   * 链路里唯一真正会被渲染的字段。`code`/`recoverable` 原样保留；
+   * `started`/`partialStdout`/`partialStderr` 也原样保留在新错误对象上
+   * （不是新信息，只是不再是唯一的载体）。
+   */
+  async run(spec: ShellExecSpec): Promise<ShellRunResult> {
+    try {
+      return await this.inner.run(spec)
+    } catch (err) {
+      if (isSshError(err) && (err.partialStdout || err.partialStderr)) {
+        throw new SshError(renderDisconnectMessage(err), err.code, err.recoverable, {
+          started: err.started,
+          partialStdout: err.partialStdout,
+          partialStderr: err.partialStderr,
+        })
+      }
+      throw err
+    }
   }
 
   start(spec: ShellExecSpec): ShellProcess {
     return this.inner.start(spec)
   }
 }
+
+/**
+ * 连接池自身完全不带存活探测的默认值（ssh2 的 `keepaliveInterval` 默认
+ * 是 0——关闭）。这个包存在的理由就是手机在 Wi-Fi/蜂窝网络之间切换时的
+ * 黑洞连接——对端不再响应任何东西，但本地 socket 表面上还"活着"。关掉
+ * keepalive 意味着唯一能发现连接已经死了的时机是"下一次真的往这条连接上
+ * 发数据"，而两次调用之间连接可以无限期地假装健康。这里给出一组固定的
+ * 默认值（不通过 Config 暴露）：让 ssh2 自己按周期发 keepalive 包，连续
+ * `keepaliveCountMax` 次没有回应就主动判定连接已死、触发 'error'/'close'，
+ * 池照常摘除、下次 acquire() 重新连接——不需要等到用户真的发起一次命令
+ * 才发现连接早就断了。
+ *
+ * 不通过 Config 暴露（跟 connectTimeoutMs/liveBufferMaxBytes 不同）：那两个
+ * 字段的"手机场景要一个不同的值"是具体、双向的（可能想调大也可能想调小，
+ * 取决于网络/UX 取舍）；keepalive 存不存在这件事本身没有类似的"某个方向
+ * 更适合手机"的论证，一组固定的、比 ssh2 默认值（完全关闭）更安全的默认
+ * 组合已经解决了这里要解决的问题。
+ */
+const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000
+const DEFAULT_KEEPALIVE_COUNT_MAX = 3
 
 /**
  * cordis 插件入口。`config.machine` 必须已经在 `ctx.remotes` 里注册过，
@@ -307,6 +381,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   const pool = new SshConnectionPool({
     credentials: (m) => ctx.remotes.credentialsFor(m),
+    connectTimeoutMs: config.connectTimeoutMs,
+    keepaliveInterval: DEFAULT_KEEPALIVE_INTERVAL_MS,
+    keepaliveCountMax: DEFAULT_KEEPALIVE_COUNT_MAX,
+    // Task 7 复审 M2：这个钩子存在好几轮 review 才成型（见 connection.ts
+    // 的文档），但在这之前从没有任何调用方真正提供它——池检测到的每一次
+    // 意外断线都被无声吞掉了。这里至少把它接到日志上：一次断线本身不是
+    // 这个插件能自动处理的事（重连是下一次 acquire() 自然发生的），但
+    // "发生过"这件事值得被看到，尤其是在排查"model 说连不上但我看着服务器
+    // 好好的"这类问题时。
+    onDisconnect: (m, error) => {
+      ctx.logger.warn(
+        'shell-ssh: 到 %s (%s@%s:%s) 的连接意外断开%s',
+        m.name,
+        m.user,
+        m.host,
+        m.port,
+        error ? `：${error.message}` : '',
+      )
+    },
   })
   // 插件的 fiber 被 dispose（重载/组合拆卸）时释放连接池——disposeAll() 会
   // 等到每条连接真的触发 'close' 才 resolve（见 connection.ts 的注释），
@@ -318,25 +411,57 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // 给不继承 Service 的类用的写法。
   new CordisSshShellExecutor(ctx, pool, machine, config.liveBufferMaxBytes)
 
-  // 机器名这件事必须让 model 知道，但不能通过 stderr（见 index.ts 里
-  // `SshShellExecutor` 类文档："这是 Task 7 的工作：...通过
-  // ctx.systemPrompt.section(...) ...贡献"）。systemPrompt 是可选依赖——
-  // 没有它这个插件仍然能提供一个能跑的 ctx.shell，只是 model 不知道机器名；
-  // 不把它放进 `inject`，否则没挂 dsh-system-prompt 的组合（比如这个包自己
-  // 的单元测试）会让这个插件永远卡在等待，而不是正常加载。
-  const systemPrompt = ctx.get('systemPrompt') as SystemPromptLike | undefined
-  if (systemPrompt) {
-    systemPrompt.section({
-      name: 'shell-ssh:machine',
-      order: 100,
-      text:
-        `Bash commands run over SSH on the remote machine '${machine.name}' `
-        + `(${machine.user}@${machine.host}:${machine.port}). A lost connection surfaces as a `
-        + 'tool-call error, not a command result — retry only when the error says it is safe to. '
-        + 'When a background job\'s status becomes "killed" due to connection loss, that means the '
-        + 'SSH connection was closed, not that the remote process was necessarily terminated: a '
-        + 'plain (non-PTY) exec channel does not reliably let the remote host reap the process, so '
-        + 'a command that forked children (e.g. a background build) may still be running there.',
-    })
-  }
+  // Task 7 复审 I2：机器名这件事必须让 model 知道，但不能通过 stderr（见
+  // index.ts 里 `SshShellExecutor` 类文档）。这里原来用 `ctx.get('systemPrompt')`
+  // ——被证明是错的：`ctx.get()` 是一次性快照，只在 systemPrompt 恰好已经
+  // 先于这个插件挂载时才拿得到东西。在真实的（并发初始化的）Loader 组合
+  // 里，这个插件的 fiber 只要 `remotes`+`credentials` 一齐活就会解除阻塞，
+  // 没有任何东西保证 dsh-system-prompt 排在它前面——`systemPrompt` 后挂载
+  // 时，`ctx.get()` 拿到的是 `undefined`，且**永久**如此：`apply()` 只跑
+  // 一次，不会因为 systemPrompt 后来才出现而重新执行。第二种失败模式：
+  // `section()` 的注册"随调用它的 fiber 一起被 dispose"，一次 systemPrompt
+  // 重载会清空它自己的注册表，这个插件贡献过的 section 不会被重放——
+  // 一次性的 `ctx.get()` 调用完全没有机会补上这一次。
+  //
+  // 正确的原语是 `ctx.inject()`（cordis/lib/types/registry.d.ts 的原话：
+  // "Run a callback once the requested services are available… the callback
+  // is unloaded and re-run whenever a required service changes"）——它是
+  // 当前 fiber 之下的一个**子 fiber**，既会在 systemPrompt 稍后才出现时
+  // 才触发，也会在 systemPrompt 重载时重新跑一遍（重新贡献这个 section），
+  // 而且不阻塞父 fiber（`apply()` 不 await 它）：没有挂 dsh-system-prompt
+  // 的组合（比如这个包自己的大部分单测）里，这个 inject 永远不会触发，但
+  // `apply()` 早就正常跑完了，`ctx.shell` 照常可用。`.catch()` 只是不让一次
+  // 意外的注册失败（比如撞上重复的 section 名）变成一个没人处理的 rejection
+  // ——记一条日志，不吞掉信息也不让它拖垮别的东西。
+  // `ctx.inject()` 返回 `Fiber & PromiseLike<Fiber>`——一个 duck-typed
+  // thenable，只有 `.then()`，没有真正 Promise 的 `.catch()`；用
+  // `Promise.resolve(...)` 转成一个真 Promise 再挂 `.catch()`。
+  void Promise.resolve(
+    ctx.inject(['systemPrompt'], (child) => {
+      const systemPrompt = (child as unknown as { systemPrompt: SystemPromptLike }).systemPrompt
+      systemPrompt.section({
+        name: 'shell-ssh:machine',
+        // Task 7 复审 M3：不是 100——100 是 dsh-tool-fs 的 'tool:read'，
+        // 用 100 会跟它正面撞上。dsh-tool-bash 自己的标准指导用的是 105
+        // （`dsh-tool-bash/lib/index.js`），这段文字是在补充/限定 bash 指导
+        // 而不是独立的一条，排在它之后才对，所以选 106。
+        order: 106,
+        text:
+          `Bash commands run over SSH on the remote machine '${machine.name}' `
+          + `(${machine.user}@${machine.host}:${machine.port}) — a DIFFERENT filesystem and process `
+          + 'space than the one running this harness: local paths, installed tools, and running '
+          + 'processes here do not exist there, and vice versa. A lost connection surfaces as a '
+          + 'tool-call error, not a command result; the error message states whether retrying is safe. '
+          + 'When a background job\'s status becomes "killed" due to connection loss, that means the '
+          + 'SSH connection was closed, not that the remote process was necessarily terminated: a '
+          + 'plain (non-PTY) exec channel does not reliably let the remote host reap the process, so '
+          + 'a command that forked children (e.g. a background build) may still be running there.',
+      })
+    }),
+  ).catch((err: unknown) => {
+    ctx.logger.error(
+      'shell-ssh: 向 systemPrompt 贡献机器名说明失败：%s',
+      err instanceof Error ? err.message : String(err),
+    )
+  })
 }

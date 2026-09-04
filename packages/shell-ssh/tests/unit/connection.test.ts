@@ -308,6 +308,56 @@ describe('SshConnectionPool', () => {
     )
   })
 
+  // ---------------------------------------------------------------------
+  // 协调者二审 I3：上面两个测试命中的 try/catch 一开始把 client.connect()
+  // 整个调用都当成"私钥的问题"来分类——但那次调用内部校验完 privateKey 之后
+  // 还会同步调用 sock.connect()，一个非法端口在那里同步抛出
+  // ERR_SOCKET_BAD_PORT，会被原来的代码误诊成"私钥无法使用"，把用户指向
+  // 一把好端端的密钥去检查，真正的问题是机器记录里的端口值。
+  // ---------------------------------------------------------------------
+
+  it('非法端口（sock.connect() 的同步抛出）分类成 SSH_UNREACHABLE，不能被误诊成私钥问题', async () => {
+    pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+    // port || 22 的写法会把 0 当成"没给"退化成默认值 22，所以用 -1 才能
+    // 真的把一个非法值送到 sock.connect()。
+    const machine = { ...machineFor(1), port: -1 }
+    await expect(pool.acquire(machine)).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SshError
+        && err.code === 'SSH_UNREACHABLE'
+        && err.recoverable
+        && !err.message.includes('私钥')
+        && err.message.includes('Port should be'),
+    )
+  })
+
+  // ---------------------------------------------------------------------
+  // 协调者二审 M2：池此前完全不设置 ssh2 自己的存活探测——黑洞连接（手机从
+  // Wi-Fi 切到蜂窝网络，对端不再响应任何东西）在这种配置下永远不会自己
+  // 触发 'error'/'close'。这里只验证"选项被原样传给了 ssh2"这一半机制；
+  // Task 7 的 apply() 在构造池时提供了具体的默认值，那一半是纯字段赋值，
+  // 不需要单独的端到端测试。
+  // ---------------------------------------------------------------------
+
+  it('keepaliveInterval/keepaliveCountMax 原样传给 ssh2', async () => {
+    sshd = await startFakeSshd()
+    pool = new SshConnectionPool({
+      credentials: async () => ({ password: 'x' }),
+      keepaliveInterval: 12345,
+      keepaliveCountMax: 7,
+    })
+    const client = await pool.acquire(machineFor(sshd.port))
+    expect((client as unknown as { config: { keepaliveInterval: number } }).config.keepaliveInterval).toBe(12345)
+    expect((client as unknown as { config: { keepaliveCountMax: number } }).config.keepaliveCountMax).toBe(7)
+  })
+
+  it('不设置 keepaliveInterval 时，沿用 ssh2 自己的默认值（关闭）', async () => {
+    sshd = await startFakeSshd()
+    pool = new SshConnectionPool({ credentials: async () => ({ password: 'x' }) })
+    const client = await pool.acquire(machineFor(sshd.port))
+    expect((client as unknown as { config: { keepaliveInterval: number } }).config.keepaliveInterval).toBe(0)
+  })
+
   describe('主机指纹校验', () => {
     it('未固定指纹时按可信首连处理，正常连接', async () => {
       sshd = await startFakeSshd()

@@ -2899,17 +2899,25 @@ git commit -m "feat(mobile-app): mobile profile 补丁，禁用本地进程依�
 
 ## Task 13: 端到端组合验证
 
-> **一个必须先验证的风险（Task 10 复审提出）**：单元测试用的是直接
-> `ctx.plugin()` 挂载，而真实 dsh 走的是 **Loader**，后者把每个条目挂进
-> **隔离组（isolate groups）**。`ctx.provide('remotes', ...)` 在一个组里注册的服务，
-> **对另一个组里的 shell-ssh 条目可能不可见**。
+> **隔离组风险已在 Task 7 查清，结论对我们有利。** 读 `cordis-plugin-loader/lib/index.js`
+> 确认：`access()` 读 `entry.options.isolate?.[name]`，缺失则直接返回；
+> `patch-context` 构造的 `newMap` 是 `Object.create(父级 isolate map)`，
+> **只对 `entry.options.isolate` 里列出的键给独立符号**。
 >
-> 这是"两个插件各自都能工作，装到一起却互相看不见"的典型形态，而且
-> **只有走 Loader 才会暴露**——直接 `ctx.plugin()` 的测试永远绿。
+> 所以**隔离是严格 opt-in 的**：`group: true` 只是组织性嵌套，原型链透明。
+> 已用两个真 Loader 测试验证（平级兄弟、以及嵌在子组里），
+> 第三种形态（分处两个不同兄弟组）在原理上等价——没有 `isolate` 时所有
+> `newMap` 都原型链到根 map，解析到同一个全局符号与同一个
+> `ctx.reflect.store` 槽位，**深度与兄弟位置都无关**。
 >
-> 所以本任务的第一步不是跑 `--dump-config`，而是**先用 `cordis-plugin-loader`
-> 起一个装配测试**，确认 `shell-ssh` 的插件真的能拿到 `ctx.remotes`。
-> 若拿不到，需要的是 `inject` 声明或分组配置上的调整，而不是改代码逻辑。
+> **Task 12 的唯一约束**：profile 里不要对 `remotes` / `credentials` / `shell` /
+> `systemPrompt` 声明 `isolate`。除此之外分组随意。
+
+> **Task 11 的注意事项**：`shell-ssh/tests/composition/loader.test.ts` 里有两处
+> `../../../remote-registry/src/plugin.ts` 的路径——`ctx.loader.create()` 用的是
+> 裸 `import()`，绕过 vitest 的转译，所以它依赖 Node 原生的类型剥离
+> （Node 20 上会 `ERR_UNKNOWN_FILE_EXTENSION`，但 `engines` 已要求 22.19+）。
+> 入口移到 `lib/` 时要**更新这两个路径而不是删掉这两个测试**。
 
 
 

@@ -47,7 +47,12 @@ export class SshShellExecutor extends ShellExecutor {
 | 陷阱 | 症状 | 规避 |
 | --- | --- | --- |
 | TypeScript 参数属性 `constructor(readonly x: T)` | 类型剥离下硬 `SyntaxError`，但 vitest 全绿 | 根 tsconfig 已开 `erasableSyntaxOnly`；字段声明后在构造体内赋值 |
-| CommonJS 包的具名导入 | `ssh2` 是 CJS，`import { Client } from 'ssh2'` 在真实 Node ESM 下抛 `SyntaxError: Named export not found`，vitest 却能过 | 用 `import ssh2 from 'ssh2'` 再解构；`import type` 不受影响（会被擦除） |
+| CommonJS 包的具名导入 | `ssh2` 是 CJS。**cjs-module-lexer 的检测是逐个导出、部分成功的**：`import { Client }` 能用，`import { Server }` 抛 `SyntaxError: Named export not found`，`import { Client, Server }` 也抛。vitest 全都能过 | 用 `import ssh2 from 'ssh2'` 再解构；`import type` 不受影响（会被擦除） |
+
+**关于上面这条的重要细节**：正因为检测是部分成功的，一份用 `import { Client }`
+且**当前能跑**的代码，离崩溃只差某人往同一条 import 里加一个 `Server`——
+而那次崩溃发生在生产环境，测试全绿。所以光有"能否加载"的动态断言不够，
+还需要**静态形状断言**（检查源码用的是默认导入）来拦住这种漂移。
 
 **凡是要装进 dsh 运行的 `src/` 代码，验证时必须用真的 `node` 子进程，不能只看 vitest。**
 （探针文件要放在使用该依赖的包目录内——pnpm 严格布局下，裸标识符从 workspace 根解析不到。）
@@ -2733,6 +2738,63 @@ git commit -m "build: tsdown 构建，入口指向 lib/ 以便 dsh 加载"
 
 ## Task 12: `mobile-app` bundle
 
+> **计划缺口（Task 12 派活前查出）**：`dsh-base` 里**没有任何 storage 行**
+> （只有 `credentials`），`dsh-headless` 也没有——只有 `dsh-web-app` 有。
+> 而 `remote-registry` 注入 `storageDomain`，所以按原计划组出来的 profile
+> **根本不会激活注册表插件**，而且是静默不激活。
+>
+> mobile bundle 必须自己插入 storage 三层，行 id 与 `dsh-web-app` 保持一致
+> （这样两个 bundle 叠加时按 id 覆盖，最后一层生效，不会重复挂载）：
+>
+> ```yaml
+> - id: storage
+>   name: '@deepseek-ai/dsh-storage'
+> - id: storage-json
+>   name: '@deepseek-ai/dsh-storage-json'
+>   config:
+>     root: !!js dshHomePath('storages')
+> - id: storage-domain
+>   name: '@deepseek-ai/dsh-storage-domain'
+>   config:
+>     backend: json
+> ```
+
+> **插件入口名要用 `./plugin` 子路径**：Task 11 之后两个包的 `.` 是纯 barrel，
+> cordis 接线在 `./plugin`。所以 `name` 要写
+> `@dsh-mobile/remote-registry/plugin` 与 `@dsh-mobile/shell-ssh/plugin`，
+> 写成裸包名会加载到一个没有 `apply` 的模块。
+
+> **不要对 `remotes` / `credentials` / `shell` / `systemPrompt` 声明 `isolate`**
+> （Task 7 查实：隔离是严格 opt-in，分组本身无害）。
+
+> **未配置机器时的行为（Task 12 定稿，经两轮实测）**：
+>
+> `dsh-app-boot` 的 `assertEntriesActivated()` **把 PENDING 的 fiber 当作 FAILED**
+> ——实测：一个只声明 `inject: ['neverProvided']` 的插件会让整棵树报
+> `1 entry did not activate ... pending (waiting for service: ...)`。
+>
+> 所以有三种形态，前两种都会让 `dsh --profile mobile` 每次调用（连 `--help`）
+> 都 exit(1)：
+>
+> | 方案 | 结果 |
+> | --- | --- |
+> | `shell-ssh` 启用且未配机器时抛错 | 整树失败 ❌ |
+> | `shell-ssh` 启用、`tool-bash` 也启用但无 `ctx.shell` | `tool-bash` 永久 PENDING → 整树失败 ❌ |
+> | **`shell-ssh` 启用但不注册 `ctx.shell`；`tool-bash` 出厂禁用** | 干净启动 ✓ |
+>
+> 第三种也正是 **dsh 自己的先例**：`tool-subagent-codex` /
+> `tool-subagent-claude-code` 就是出厂禁用的，注释写着
+> *"Host availability alone grants no tool"*。
+>
+> 用户注册机器后，由 app 的设置界面往 profile 层的 `cordis.patch.yml`
+> 写一行把 `tool-bash` 打开——这属于周期二的 UI 工作，不是手编 YAML。
+>
+> **后续项（已定级为"小"）**：目前注册机器需要重启才能激活 shell。
+> `remote-registry` 的域已经在每次写入时发出 `domain/changed`，带
+> `{domain, table, key, operation}`，**足够过滤，且不需要改 remote-registry**。
+> 改动全在 `shell-ssh`：把"注册 `ctx.shell` + systemPrompt 段落"抽成函数，
+> 未找到机器时用 `ctx.effect` 订阅该事件，出现时调用它。几十行。
+
 **Files:**
 - Create: `packages/mobile-app/package.json`
 - Create: `packages/mobile-app/cordis.patch.yml`
@@ -3009,13 +3071,23 @@ Expected: 全部通过
 Run: `pnpm typecheck`
 Expected: 无错误
 
-- [ ] **Step 5: jitless 全量回归**
+- [ ] **Step 5: jitless 回归（不能用 vitest）**
 
-iOS 上 V8 必然 jitless 且 `WebAssembly` 不存在。整个测试套件在 jitless 下再跑一遍，
-把任何依赖 JIT 或 WASM 的代码在 Mac 上就拦住，而不是等移植到设备才发现。
+iOS 上 V8 必然 jitless 且 `WebAssembly` 不存在。但**整套 vitest 跑不了 jitless**
+——实测：Vite 自己的工具链需要 `WebAssembly`，runner 在任何测试代码执行前就死于
+`WebAssembly is not defined`。这与我们的代码无关，是 Vite 的约束。
 
-Run: `pnpm test:jitless`
-Expected: 与 `pnpm test` 结果一致，全部通过
+所以 jitless 验证要**直接打真实的 `dsh` 二进制**：
+
+```bash
+/opt/homebrew/bin/node --jitless \
+  /opt/homebrew/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --profile mobile --dump-config
+```
+
+以及用真 `node --jitless` 子进程 import 两个包的构建产物（`lib/index.js` 与
+`lib/plugin.js`），确认它们在无 JIT、无 WASM 的环境下能加载。
+这两项合起来覆盖了 iOS 上真正会发生的事；vitest 那条路是覆盖不到的。
 
 若某个用例只在 jitless 下失败，先查是不是引入了依赖 `WebAssembly` 的传递依赖：
 

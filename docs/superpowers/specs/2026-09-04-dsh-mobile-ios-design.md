@@ -66,7 +66,8 @@ iOS 第三方 app 拿不到 `dynamic-codesigning` entitlement，V8 只能以 jit
 
 | 插件 | 依赖 | iOS |
 |---|---|---|
-| `dsh-tool-fs` / `dsh-tool-fs-search` | 无子进程调用，纯 JS | 活 |
+| `dsh-tool-fs` | 无子进程调用，纯 JS | 活 |
+| ~~`dsh-tool-fs-search`~~ | **注入 `subprocess`，靠打包的 ripgrep 二进制** | **死**（见下方更正） |
 | `dsh-tool-str-replace-editor` | 纯 JS | 活 |
 | `dsh-subagent-spawn-in-process` / `-fork-in-process` | 进程内 | 活（多 agent 保得住） |
 | `dsh-jobs-local` | 无子进程调用 | 活 |
@@ -75,7 +76,21 @@ iOS 第三方 app 拿不到 `dynamic-codesigning` entitlement，V8 只能以 jit
 | `dsh-terminal` | `node-pty` | 死 |
 | `dsh-subprocess-local` | `node-pty` + `node:child_process` | 死 |
 
-**结论：除"起本地进程"外，dsh 的骨架完整存活。**
+**更正（Task 13 组合验证时发现，2026-09-04）**：上表有一处重大错误。
+`dsh-tool-fs-search` 被判为"纯 JS 存活"，**是错的**——当时我 grep 的是
+`node:child_process`，而它用的是 dsh 的 `subprocess` **服务**。它自己的包描述写着：
+
+> *"Model-facing filesystem discovery tools (glob, grep) backed by the packaged
+> **ripgrep binary** (@vscode/ripgrep)"*
+
+所以 **glob 与 grep——agent 最常用的两个工具——在 iOS 上不可能工作**。
+
+同时发现 `dsh-permission-presets` 注入 `shell`，即**权限系统本身依赖 shell 服务存在**。
+两者叠加的后果：禁掉全部本地 shell 后端之后，这两个 dsh-base 自带的条目永久
+PENDING，而 `assertEntriesActivated()` 把 PENDING 当 FAILED，**整棵插件树无法启动**。
+
+**结论修订：除"起本地进程"外骨架存活——但"起本地进程"波及的范围比原先估计的大，
+包括文件搜索与权限预设两个核心组件。**
 
 ### 3.4 必须自己编译 Node（无现成方案）
 

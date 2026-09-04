@@ -1,0 +1,256 @@
+# dsh-mobile 的 `mobile-app` bundle 补丁。
+#
+# 应用顺序（见 ~/.dsh/profiles/mobile/package.json 里的
+# `dsh.profile.bundles`）：`@deepseek-ai/dsh-base` → `@deepseek-ai/dsh-headless`
+# → 本文件。补丁按 id 覆盖前面层已经插入的行（dsh-app-boot 的 Profiles 文档：
+# "an id-targeted patch replaces the named entry's whole `config`"），所以下面
+# 每一条 `- id: X\n  disabled: true` 都是在覆盖 dsh-base 已经插入的同 id 行，
+# 不是新增；真正的新增都在下面的 `insert:` 块里。
+#
+# iOS 第三方 app 不能 fork/exec：容器沙箱本身拒绝 process-exec 系统调用，
+# AMFI 代码签名策略只允许签名链落在本 app 自己 team 内的可执行文件——这两条
+# 加在一起意味着"在沙箱里跑一个通用本地 shell"（Termux 那种模式）在 iOS 上
+# 根本不存在。dsh 想在 iOS 上跑起来，就必须先把每一个会 fork/exec 本地进程
+# 的插件行找出来、明确关掉，再用不 fork/exec 的等价物补上同一个服务位——这里
+# 是 `shell-ssh`，把执行转发到用户自己配置的远程机器。
+#
+# 下面每一条禁用都写清楚"这一行在 iOS 上物理不可能工作，原因是什么"，而不是
+# 一句"先关着"——这样以后有人想放开某一行时，能一眼看出它到底属于"能在 iOS
+# 上跑、只是这轮没接"，还是"这个能力本身在 iOS 上不存在"。
+
+# ── A. 禁用：直接依赖本地进程的执行后端 ───────────────────────────────
+
+# node-pty（PTY）与 child_process（管道式 exec）——iOS 应用容器的
+# process-exec 策略直接拒绝 fork/exec 系统调用，AMFI 只允许执行签名链落在
+# 本 app team 内的二进制，两者都用不了。这是本文件所有"本地进程"类禁用的
+# 根：下面 `bash-sandbox` 之所以也要关，是因为它在这个服务之上只加了一层
+# 文件沙箱包装，真正 spawn 子进程走的还是这一行。
+- id: subprocess
+  disabled: true
+
+# 建在 `subprocess` 之上的一次性 bash 执行后端（confined spawn）。跟
+# `subprocess` 一样卡在 iOS 没有可用本地 spawn 这件事上，无法独立于它工作。
+# 由 `shell-ssh` 提供的远程 `ShellExecutor` 顶替同一个 `ctx.shell` 服务位
+# （见下面 C 段）。
+- id: bash-sandbox
+  disabled: true
+
+# Windows 专用的 pwsh 执行后端（走 Windows ACL，不是 landlock/Seatbelt）。
+# iOS 既不是 Windows，也没有对应的远程 PowerShell 替代——这不是"暂时关掉"，
+# 是这个 profile 的适用范围之外，永远不会有理由在这里重新打开。
+- id: pwsh-sandbox
+  disabled: true
+
+# 本地 PTY 常驻终端（node-pty）。跟 `subprocess` 一样卡在 iOS 的 fork/exec
+# 限制上。PTY 版远程实现（`dsh-terminal-ssh`：通过 SSH channel 请求一个真
+# pty，而不是本仓库 `shell-ssh` 用的 plain exec channel）在架构上可行，但
+# 明确不在这轮范围内——见仓库根 plan 文档"本计划不包含"一节。
+#
+# 补充事实：在 dsh-base + dsh-headless 这个组合下，`terminal-bash` 这一行
+# 从未被真正装载过——它只出现在 `dsh-agent-presets` 挂载的 agent preset
+# （`config/agent-presets/*/agent.cordis.yml`，例如 `minimal` 预设的
+# `persistent-shell` 分组）里，而 headless 模式完全不挂 agent-presets（那是
+# `dsh-web-app` 专属的机制，`dsh-headless` 的补丁里没有这一行）。这里仍然
+# 显式禁用它是防御性的：万一将来 mobile profile 改成基于 `dsh-web-app`
+# （带 preset）的组合，这条禁用不会因为"当前这份组合里根本用不上"而被漏掉。
+- id: terminal-bash
+  disabled: true
+
+# ── A'. 禁用：暴露给模型的本地 shell 工具 ─────────────────────────────
+# 必须和上面的执行后端一起关，否则模型的工具目录里会出现一个每次调用都失败
+# 的工具。
+
+# `tool-bash`/`tool-pwsh` 只声明对 `ctx.shell`/`ctx.pwsh` 服务名的硬依赖
+# （inject），不关心是谁提供的——理论上 `shell-ssh` 补上 `ctx.shell` 之后，
+# `tool-bash` 自己是能重新激活、跑在远程执行之上的。这里仍然保持它禁用，
+# 是因为：
+#   1）`tool-bash` 的工具描述与 `workdir` 默认值语义假设的是"这次调用的当前
+#      会话 cwd"这种本地路径身份（session.header.cwd），跟"命令实际跑在一台
+#      完全不同的远程机器、有自己独立的文件系统"这件事本身对不上，需要专门
+#      的工具文案而不是原样复用；
+#   2）更根本的原因见文件末尾"未配置机器时会发生什么"一节——`shell-ssh` 默认
+#      也是禁用的，两者的启用被设计成用户在自己的 profile 级
+#      `cordis.patch.yml` 里做的同一次改动，而不是 mobile-app bundle 单方面
+#      替用户打开一个此刻必然无法工作的工具。
+- id: tool-bash
+  disabled: true
+
+# 同上一条的理由：Windows 分支的模型侧工具，跟 pwsh-sandbox 一起关。
+- id: tool-pwsh
+  disabled: true
+
+# ── A''. 禁用：读取本地进程/环境的探测类插件 ──────────────────────────
+
+# 读当前机器上的 tmux 会话列表——iOS app 容器里不存在 tmux 这种东西，甚至
+# 不存在"同一台机器上还有其他进程"这个概念。跟 `terminal-bash` 一样，
+# dsh-base + dsh-headless 这个组合本来就没有装载它（同样只出现在 agent
+# preset 里），这里的禁用同样是防御性的，理由同上。
+- id: tmux-context
+  disabled: true
+
+# `dsh-sandbox-local`：本地 exec 沙箱后端，两种二选一实现要么是 Linux 的
+# landlock，要么是 macOS 的 sandbox-exec（Seatbelt）。iOS 上两者都不存在——
+# 不是这个内核，也没有 sandbox-exec 这个系统程序。但这不代表 iOS 上"没有
+# 沙箱"：iOS 应用容器本身就是操作系统级别的沙箱边界（App Sandbox /
+# container），dsh 完全不需要、也没有能力在它之上再实现一层本地 exec
+# 沙箱。`fs-sandbox`（`dsh-fs-sandbox`）与 `sandbox-policy`
+# （`dsh-sandbox-policy`）**不在**这份禁用清单里——它们只是策略/工作区根
+# 值的持有者，约束的是 `tool-fs` 这类纯 JS 文件系统工具的读写范围，不依赖
+# 任何本地 exec 能力，在 iOS 上依然有意义、依然生效。
+- id: sandbox
+  disabled: true
+
+# ── B. 新增：storage 三层（remote-registry 的前提条件）───────────────
+#
+# 排查这个任务时发现的组合缺口：`dsh-base` 完全没有任何 storage 行（只有
+# `credentials`），它唯一叠加的另一层 `dsh-headless` 也没有——三个官方
+# bundle 里只有 `dsh-web-app` 挂了 storage 三件套。而 `remote-registry`
+# 的 cordis 接线（`plugin.ts`）对 `storageDomain` 声明的是硬 inject：没有
+# 这个服务，它的 fiber 会一直 pending，既不报错也不生效——"注册一台机器"
+# 这个功能会在没有任何提示的情况下彻底不可用。
+#
+# 行 id 特意跟 `dsh-web-app` 保持一致（`storage`/`storage-json`/
+# `storage-domain`），这样两个 bundle 叠加到同一个 profile 时（比如未来
+# mobile 也想要 Web 界面）按 id 覆盖、最后一层生效，不会出现同一个服务被
+# 挂载两次的冲突。
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    # ── C. 新增：把执行能力接到用户自己的远程机器上 ───────────────────
+    #
+    # 上面 A 段关掉的每一样本地能力，这里都换成一个不 fork/exec 本地进程的
+    # 等价物：`shell-ssh` 实现 `@deepseek-ai/dsh-shell` 的 `ShellExecutor`
+    # 抽象类，把 `ctx.shell` 背后的实现从"本地 spawn"换成"SSH 到用户登记过
+    # 的一台远程机器"；`remote-registry` 是那台机器的登记表（增删查、凭据
+    # 存取、连接探针），`shell-ssh` 依赖它取机器信息与密钥。
+    #
+    # 两个包都用 `./plugin` 这个独立子路径导出，**不能**写成裸包名：Task 11
+    # 之后两个包的 `.`（`index.ts`）是纯 barrel，只导出类型和不带 cordis
+    # 运行时依赖的纯函数/类，真正的 cordis 接线（`name`/`inject`/`apply`）
+    # 只从各自的 `<pkg>/plugin` 子路径导出。写成裸包名会加载到一个没有
+    # `apply` 的模块，插件树装载会直接失败。
+    #
+    # 不对 `remotes`/`credentials`/`shell`/`systemPrompt` 声明 `isolate`：
+    # Task 7 已经读过 `cordis-plugin-loader` 的源码验证过——`access()` 只在
+    # `entry.options.isolate` 显式列出某个服务名时才会给它一个独立符号，
+    # `patch-context` 构造的 isolate map 通过 `Object.create()` 对父级原型
+    # 透明，`cordis:group` 的分组本身不会意外把任何服务隔离出这棵树。隔离是
+    # 严格 opt-in 的，这里放心用分组组织可读性即可。
+    - id: remote-registry
+      name: '@dsh-mobile/remote-registry/plugin'
+
+    # 未配置机器时会发生什么，以及为什么这里默认 disabled：true
+    # ────────────────────────────────────────────────────────────────
+    # `shell-ssh` 的 `apply()`（`packages/shell-ssh/src/plugin.ts`，Task 7
+    # 就已经做出的既有设计，本任务不碰包源码、也不会去改它）在插件加载期间
+    # 就同步调用 `ctx.remotes.get(config.machine)`：查不到就直接
+    # `throw new SshError(..., 'SSH_NO_MACHINE', false)`，让**整个插件条目**
+    # 加载失败——这是有意为之的"没有退化模式"："一个指向不存在机器的
+    # shell-ssh 配置没有任何可以退化运行的方式，快速失败好过悄悄挂着一个
+    # 永远报错的 ctx.shell"（原文见该文件对 `apply()` 的注释）。
+    #
+    # 这条失败不会停在"这一个插件条目"上：`dsh-app-boot` 的
+    # `assertEntriesActivated()` 会把任何未激活的已启用条目算作整棵树装载
+    # 失败，`boot()` 收到后会 dispose 掉整个 context 并把原因包进一句
+    # `${bin}: plugin tree failed to load: ...` 往外抛，`installFailLoud`
+    # 最终把它打成一行 `fatal load failure` 写到 stderr 并 `exit(1)`。也就是
+    # 说：只要 `machine` 指向注册表里不存在的名字，`dsh --profile mobile`
+    # 这个可执行文件本身——不只是"跑一条远程命令"这一件事——会在**任何**
+    # 调用上直接崩溃退出，包括 `--help`、包括跟 shell 完全无关的任务。
+    #
+    # `RemoteRegistry` 在全新 profile 上必然是空的（没有任何机器被注册
+    # 过），所以任何占位机器名（`default`、`unconfigured`……随便写哪个）在
+    # 全新安装上都会踩中同一个 `SSH_NO_MACHINE`，区别只是错误信息里的名字
+    # 变了——这不是"选一个更好的默认值"能绕开的问题。
+    #
+    # 三个选项，以及为什么选第三个：
+    #
+    #  1）照抄任务给的示例，`shell-ssh` 默认启用、`machine: default`——
+    #     后果是全新安装的 `dsh --profile mobile` 在用户完成任何设置之前
+    #     完全无法启动，包括那些跟 shell 毫无关系的功能（文件工具、
+    #     skill、web 搜索、subagent……）。"快速失败"本身没错，错的是失败
+    #     的范围：一个还没配置远程机器的用户，理应还能用这个 app 做别的
+    #     事，而不是被挡在启动画面之外。
+    #
+    #  2）参考 `@tencentcloudadp/dsh-adp` 的模式：那个包让 `AdpService` 的
+    #     构造函数完全不做网络/凭据校验，把每一个需要凭据的方法单独包一层
+    #     "resolve 失败就抛 `MISSING_CREDENTIAL`，带一句人话"（见该仓库
+    #     `src/core/service.ts` 的 `gatewayKeyRef`/`controlCredentials`
+    #     等方法），插件本身永远能挂载成功，只在真正调用时才可能失败。
+    #     这个模式在这里**技术上走不通**，不是不想选：ADP 的"永远挂载
+    #     成功"建立在"构造函数是纯赋值、不做校验"这个前提上，而
+    #     `shell-ssh` 的 `apply()` 已经是既有实现，在插件激活阶段就同步
+    #     做了 `ctx.remotes.get()` 校验并在失败时 `throw`——要拿到"挂载
+    #     成功、调用时才报错"的效果，需要改 `shell-ssh` 自己的
+    #     `apply()`（比如改成挂一个"惰性解析、真正执行前才查机器"的
+    #     `ShellExecutor`），这已经是包源码层面的改动，超出本任务"不修改
+    #     两个包源码"的边界，只能留给以后的任务判断要不要做。
+    #
+    #  3）（选择）`shell-ssh` 这一行在 bundle 里默认 `disabled: true`，
+    #     `machine` 留一个明显是占位符的值。全新安装的 `dsh --profile
+    #     mobile` 因此完全启动正常——`remotes` 注册表、文件工具、skill、
+    #     web 搜索、subagent 等等都可用，唯独没有远程 shell 执行（`tool-bash`
+    #     反正也在 A' 段默认禁用，这一点上模型侧没有任何可观察的区别）。
+    #     用户注册好一台机器之后，在自己的 profile 级
+    #     `cordis.patch.yml`（`dsh-app-boot` 文档："applied after every
+    #     bundle layer"，且带热重载）里用真实机器名覆盖 `shell-ssh` 的
+    #     `config.machine` 并把这一行和 `tool-bash` 一起
+    #     `disabled: false`——这一步失败会精确复现同一个 `SSH_NO_MACHINE`
+    #     诊断，但这时候失败的含义变了：这是用户主动做的一次"启用远程
+    #     执行"的配置改动踩了错，而不是"什么都还没做就先崩溃给用户看"。
+    #     这也是为什么 A' 段把 `tool-bash`/`tool-pwsh` 的重新启用同样描述
+    #     成"用户自己那次改动的一部分"而不是这里代劳：两者要一起打开，
+    #     一起失败或一起成功，行为才是可预期的。
+    - id: shell-ssh
+      name: '@dsh-mobile/shell-ssh/plugin'
+      disabled: true
+      config:
+        # 占位符，不指向任何真实机器——启用这一行前必须先用设置/命令行把一台
+        # 机器录入 `remote-registry`，再把这里的值换成那台机器的真实
+        # `name`，见上面大段注释。
+        machine: default
+
+# ── D. MCP：不新增行，只留一条约束说明 ────────────────────────────────
+#
+# `@deepseek-ai/dsh-mcp-client` 不是"一个全局服务 + 一个传输方式配置项"的
+# 形状：它是"每挂一个实例对应一个 MCP server"的插件，`transport` 是它自己
+# `Config` 上的一个判别式联合字段（`'stdio' | 'streamable-http'`），在
+# **添加某个具体 server 的那一行**上选择，不存在一个全局开关能替所有实例
+# 决定走哪条传输（见该包 `lib/types/index.d.ts` 里 `StdioConfig` /
+# `StreamableHttpConfig` 两个互斥接口，以及 README 里两条示例分别在各自的
+# 行上写 `transport: stdio` / `transport: streamable-http`）。
+#
+# 更重要的是：`dsh-base`、`dsh-headless`、`dsh-web-app` 三个官方 bundle
+# 都**没有**挂载任何一个 `dsh-mcp-client` 实例（已核对三份 `cordis.patch.yml`
+# 源文件），所以在这个 profile 组合里根本没有一个已存在的 `id: mcp-*` 行可
+# 供本补丁覆盖——patch 是按 id 覆盖既有行，不能对一个尚不存在的 id 预先
+# 写下"以后必须是什么样"的约束，硬造一个从未被引用过的配置键只会是一个
+# 没人读的死配置。
+#
+# 所以这里不新增行，只把约束写清楚给以后任何往这个 profile 加 MCP server
+# 的人看：任何新增的 `dsh-mcp-client` 行，`transport` 必须是
+# `streamable-http`，绝不能是 `stdio`——`stdio` 传输的实现是
+# `child_process.spawn` 一个子进程（`StdioClientTransport`），这正是本文件
+# 开头说的、iOS 沙箱直接拒绝的 process-exec 路径，跟 `subprocess`/
+# `bash-sandbox` 被禁用是同一个物理限制，不是这个 profile 单独的偏好。
+
+# ── E. subagent 的 codex / claude-code provider ───────────────────────
+#
+# dsh-base 在这个 profile 组合下并不挂载 `tool-subagent-codex` /
+# `tool-subagent-claude-code`（那两行只存在于 `standard`/`code` 等 agent
+# preset 里，headless 模式不挂 preset，见 A 段 `terminal-bash` 的说明）。
+# 即便挂载，它们默认也是 `disabled: true`（preset 文件原话："Production
+# dsh does not install these optional providers"）——`codex`/`claude-code`
+# provider 本身就是各自 fork 一个外部 CLI 子进程，同样撞在 iOS 的
+# process-exec 限制上，不需要本文件额外处理。

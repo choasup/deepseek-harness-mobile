@@ -1,0 +1,13 @@
+{
+  "name": "@dsh-mobile/mobile-app",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { "./cordis.patch.yml": "./cordis.patch.yml" },
+  "files": ["cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "dependencies": {
+    "@dsh-mobile/remote-registry": "workspace:*",
+    "@dsh-mobile/shell-ssh": "workspace:*"
+  },
+  "devDependencies": { "js-yaml": "^4.2.0" }
+}

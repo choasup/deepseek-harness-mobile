@@ -114,6 +114,24 @@ PENDING，而 `assertEntriesActivated()` 把 PENDING 当 FAILED，**整棵插件
 **结论修订：除"起本地进程"外骨架存活——但"起本地进程"波及的范围比原先估计的大，
 包括文件搜索与权限预设两个核心组件。**
 
+**处置（2026-09-05）：mobile profile 现在能完整启动。**
+
+| 组件 | 处置 | 代价 |
+| --- | --- | --- |
+| `permission-presets`（行 id `permission`） | 禁用 | **无实质损失**。它是设置界面里把 sandbox-mode 与 approval-policy 打包成一个选项的下拉框，不是执行机制。已核实整个 dsh 里只有它自己和 `dsh-tool-cordis`（开发用内省工具，不在基础组合里）引用 `permissionPresets`。真正的强制链 `sandbox-policy` / `fs-sandbox` / `approval` 全部保留 |
+| `tool-fs-search`（`glob` / `grep`） | 禁用 | **真实能力损失**。需要纯 JS 重实现才能补回，属于后续工作 |
+
+实测（`node --expose-internals`，见 §环境注记）：**0 个未激活条目**，`--help` 退出码 0，
+真实启动一路走到 LLM 供应商解析（`NO_ADAPTER`，因为本机默认模型是 ADP 而 mobile
+profile 未装该插件）——与预期的 `MISSING_CREDENTIAL` 同性质，都证明整棵树实例化完成。
+
+**一个测试真空（已补）**：补丁按**行 id** 定位，而错误消息显示的是**包名**，两者常常
+不同——`@deepseek-ai/dsh-permission-presets` 的行 id 是 `permission`。照着报错写 id
+会**静默无效**：dsh 只打一条 `entry "xxx" not found` 的 warning，补丁看起来配好了，
+实际那一行从没被禁用，而既有测试全绿。已加
+`packages/mobile-app/tests/composition/row-ids.test.ts`，把每个禁用 id 拿去和
+dsh 自己 bundle 的组合对账，并带反向对照。
+
 ### 3.4 必须自己编译 Node（无现成方案）
 
 - [nodejs-mobile](https://github.com/nodejs-mobile/nodejs-mobile) 社区 fork 仍在维护（2026-04 有更新），但版本停在 **Node 18.20.4**

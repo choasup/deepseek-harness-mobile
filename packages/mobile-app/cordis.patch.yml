@@ -97,6 +97,31 @@
 - id: tmux-context
   disabled: true
 
+# ── 依赖本地进程的 dsh-base 自带条目 ────────────────────
+#
+# 这两条不是"起进程的工具"，而是**依赖起进程能力的服务**，最初的存活扫描
+# 漏掉了它们（当时 grep 的是 node:child_process，而它们用的是 dsh 的服务注入）。
+# 后果比工具本身严重：assertEntriesActivated() 把 PENDING 当 FAILED，
+# 所以只要它们等不到服务，**整棵插件树都起不来**。
+
+# glob 与 grep 靠打包的 ripgrep 二进制，通过 ctx.subprocess spawn。
+# 其 README 明写 "Registration is unconditional ... no load-time availability
+# probe"，所以它不会自己降级——必须在这里禁掉。
+# iOS 上需要一个纯 JS 的替代实现来重新提供这两个工具。
+- id: tool-fs-search
+  disabled: true
+
+# ctx.permissionPresets 是**设置界面里的一个下拉框**（把 sandbox-mode 与
+# approval-policy 两个旋钮打包成一个 Permissions 选择项），不是执行机制——
+# 真正的强制在 sandbox-policy / fs-sandbox / user-approval，那三个都保留。
+# 它 inject 了 shell，而 mobile profile 在未配置机器时没有 ctx.shell。
+# 已核实：整个 dsh 里只有它自己和 dsh-tool-cordis（开发用内省工具，不在
+# 基础组合里）引用 permissionPresets，所以禁掉它在本组合中无消费者受影响。
+# 注意行 id 是 `permission`，不是包名 `permission-presets`——
+# 补丁按 id 定位，写错了只会打一条 warning 然后静默无效。
+- id: permission
+  disabled: true
+
 # `dsh-sandbox-local`：本地 exec 沙箱后端，两种二选一实现要么是 Linux 的
 # landlock，要么是 macOS 的 sandbox-exec（Seatbelt）。iOS 上两者都不存在——
 # 不是这个内核，也没有 sandbox-exec 这个系统程序。但这不代表 iOS 上"没有

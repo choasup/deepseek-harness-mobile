@@ -71,6 +71,10 @@ function hasPrecedingComment(id: string): boolean {
 }
 
 const MUST_DISABLE = [
+  // 靠打包的 ripgrep 二进制，通过 ctx.subprocess spawn。最初被误判为纯 JS。
+  'tool-fs-search',
+  // 行 id 是 permission，不是包名 permission-presets。它 inject 了 shell。
+  'permission',
   'subprocess',
   'bash-sandbox',
   'pwsh-sandbox',
@@ -83,7 +87,6 @@ const MUST_DISABLE = [
 
 const MUST_STAY_ENABLED = [
   'tool-fs',
-  'tool-fs-search',
   'tool-str-replace-editor',
   'tool-todo',
   'tool-web',

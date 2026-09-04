@@ -167,12 +167,15 @@ function findEntry(entries: DumpEntry[], id: string): DumpEntry | undefined {
 // each) — real dsh confirms this by printing `patch: entry "..." not found`
 // to stderr and simply not inserting them, rather than inserting them
 // pre-disabled. So those two are asserted ABSENT, not disabled=true.
-const DISABLED_AND_PRESENT = ['subprocess', 'bash-sandbox', 'pwsh-sandbox', 'tool-bash', 'tool-pwsh', 'sandbox']
+const DISABLED_AND_PRESENT = [
+  // 靠打包的 ripgrep 二进制；最初被误判为纯 JS 而列为存活。
+  'tool-fs-search',
+  // 行 id 是 permission（包名是 permission-presets）。
+  'permission','subprocess', 'bash-sandbox', 'pwsh-sandbox', 'tool-bash', 'tool-pwsh', 'sandbox']
 const ABSENT_NOT_DISABLED = ['terminal-bash', 'tmux-context']
 
 const MUST_STAY_ENABLED = [
   'tool-fs',
-  'tool-fs-search',
   'tool-str-replace-editor',
   'tool-todo',
   'tool-web',

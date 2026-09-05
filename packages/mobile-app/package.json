@@ -2,12 +2,24 @@
   "name": "@dsh-mobile/mobile-app",
   "version": "0.1.0",
   "type": "module",
-  "exports": { "./cordis.patch.yml": "./cordis.patch.yml" },
-  "files": ["cordis.patch.yml"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "exports": {
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "dependencies": {
     "@dsh-mobile/remote-registry": "workspace:*",
-    "@dsh-mobile/shell-ssh": "workspace:*"
+    "@dsh-mobile/shell-ssh": "workspace:*",
+    "@dsh-mobile/tool-fs-search": "workspace:*"
   },
-  "devDependencies": { "js-yaml": "^4.2.0", "@types/js-yaml": "^4.0.9" }
+  "devDependencies": {
+    "js-yaml": "^4.2.0",
+    "@types/js-yaml": "^4.0.9"
+  }
 }

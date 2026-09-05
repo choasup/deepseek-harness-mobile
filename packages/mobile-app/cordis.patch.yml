@@ -107,7 +107,8 @@
 # glob 与 grep 靠打包的 ripgrep 二进制，通过 ctx.subprocess spawn。
 # 其 README 明写 "Registration is unconditional ... no load-time availability
 # probe"，所以它不会自己降级——必须在这里禁掉。
-# iOS 上需要一个纯 JS 的替代实现来重新提供这两个工具。
+# 替代实现见下方 tool-fs-search-js：纯 JS 引擎，工具定义与本实现逐字段对齐
+# （由 @dsh-mobile/tool-fs-search 的 parity 测试守住）。
 - id: tool-fs-search
   disabled: true
 
@@ -267,3 +268,10 @@
 # dsh does not install these optional providers"）——`codex`/`claude-code`
 # provider 本身就是各自 fork 一个外部 CLI 子进程，同样撞在 iOS 的
 # process-exec 限制上，不需要本文件额外处理。
+    # 纯 JS 的 glob / grep，顶替上面禁掉的 tool-fs-search。
+    # 它注入 fs 而不是 subprocess——iOS 上起不了进程，但读文件可以。
+    # 工具名、参数 schema、输出 schema、系统提示词的 order 全部与 dsh 的实现
+    # 对齐（有 parity 测试守住），所以对模型而言这次替换是透明的。
+    - id: tool-fs-search-js
+      name: '@dsh-mobile/tool-fs-search/plugin'
+

@@ -1,0 +1,43 @@
+{
+  "name": "@dsh-mobile/tool-fs-search",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "dsh-mobile-source": "./src/index.ts",
+      "default": "./lib/index.js"
+    },
+    "./plugin": {
+      "types": "./lib/plugin.d.ts",
+      "dsh-mobile-source": "./src/plugin.ts",
+      "default": "./lib/plugin.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "prepare": "tsdown"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tool-fs-search": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-output-retention": "^0.1.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.1-rc.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.1-rc.2"
+  }
+}

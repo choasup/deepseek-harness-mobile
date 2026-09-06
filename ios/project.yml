@@ -20,15 +20,32 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        # host 跑在 loopback 上，是明文 HTTP。只对本地网络放行，
-        # 不开全局 NSAllowsArbitraryLoads——设备内 runtime 落地后同样是 localhost。
+        # host 是明文 HTTP。模拟器上是 loopback，真机上是用户填的局域网地址
+        # （192.168.x.x 这类）——**NSAllowsLocalNetworking 覆盖不到它**，
+        # 那个键只放行无限定主机名、.local 和链路本地地址（169.254/16、fe80::/10）。
+        # 所以真机要连 Mac 就只能开 NSAllowsArbitraryLoads。
+        #
+        # 权衡说清楚：这个 app 只加载**用户自己填的那一个** URL，不加载别的任何
+        # 远端资源，所以放开的面就是那一个地址。设备内 runtime 落地后地址回到
+        # app 自己的 loopback，这一条就该删掉。
         NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
+        # iOS 14 起访问局域网要用户授权，没有这条描述系统不会弹授权框，
+        # 连接会直接失败——而失败信息看不出是权限问题。
+        NSLocalNetworkUsageDescription: 用于连接你 Mac 上运行的 dsh host。
+        # dshmobile://settings[?url=…] —— 连接设置的第二个入口。
+        # 摇一摇是给人的，这个是给自动化和"界面卡住时从链接回来"用的。
+        CFBundleURLTypes:
+          - CFBundleURLName: com.dshmobile.shell
+            CFBundleURLSchemes: [dshmobile]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dshmobile.shell
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
-        # 模拟器上跑，不签名。上架不在这一轮的目标里。
-        CODE_SIGNING_ALLOWED: NO
+        # 真机要签名。自动签名 + 开发者团队；上架不在这一轮的目标里，
+        # 装到自己设备上用开发证书就够。
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 3L724S787J

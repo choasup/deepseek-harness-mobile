@@ -1,20 +1,42 @@
 import Foundation
 
-/// dsh host 的地址——**这是设备内 runtime 落地时唯一要改的地方**。
+/// dsh host 的地址。
 ///
-/// 现在指向 Mac 上的 loopback。模拟器与宿主共享网络栈，所以 `127.0.0.1` 能通；
-/// 真机不行（那是手机自己的 loopback），需要局域网地址，而 dsh 出于安全
-/// 拒绝绑 `0.0.0.0`（原话："it would expose remote code execution to the
-/// network"）——所以真机要走反向隧道或设备内 runtime，不能简单改 IP。
+/// **设备内 runtime 落地时，要改的就是这一个文件。** 那之后地址是 app 自己那个
+/// Node 线程监听的随机 loopback 端口，不再需要用户输入，这个类型退化成一个常量。
 ///
-/// 设备内 runtime 就位后，这里换成 app 自己那个 Node 线程监听的随机端口。
+/// 在那之前地址必须可配置，而且必须**在设备上**可配置：真机没有启动参数可传，
+/// 每个人的 Mac 局域网地址也不一样。所以存在 UserDefaults 里，由设置界面写。
 enum HarnessEndpoint {
-    static let current: URL = {
-        // 允许用启动参数覆盖，便于在不同端口上跑而不必改代码重编。
-        if let raw = UserDefaults.standard.string(forKey: "HarnessURL"),
-           let url = URL(string: raw) {
+    private static let key = "HarnessURL"
+
+    /// 模拟器与宿主共享网络栈，所以这个默认值在模拟器上直接可用；真机上必然连不通，
+    /// 会落到设置界面。
+    static let fallback = URL(string: "http://127.0.0.1:7799")!
+
+    static var current: URL {
+        // 启动参数优先，便于在 Xcode / xcrun 里指定而不动持久化的值。
+        if let raw = UserDefaults.standard.string(forKey: key),
+           let url = normalize(raw) {
             return url
         }
-        return URL(string: "http://127.0.0.1:7799")!
-    }()
+        return fallback
+    }
+
+    static func set(_ raw: String) -> URL? {
+        guard let url = normalize(raw) else { return nil }
+        UserDefaults.standard.set(url.absoluteString, forKey: key)
+        return url
+    }
+
+    /// 容忍用户少打协议头（"192.168.1.9:7799"）和多余空白——手机上打字容易出错，
+    /// 而"没写 http://"是这里最常见的一种。
+    static func normalize(_ raw: String) -> URL? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if !text.contains("://") { text = "http://" + text }
+        guard let url = URL(string: text), let host = url.host, !host.isEmpty else { return nil }
+        guard url.scheme == "http" || url.scheme == "https" else { return nil }
+        return url
+    }
 }

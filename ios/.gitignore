@@ -1,4 +1,5 @@
 build/
+build-device/
 # xcodegen 从 project.yml 生成，不入库
 DshMobile.xcodeproj/
 DshMobile/Info.plist

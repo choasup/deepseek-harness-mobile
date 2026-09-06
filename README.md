@@ -180,8 +180,38 @@ dsh --profile mobile-web --port 7799 --no-open
 ```
 
 **这一版的 runtime 还在 Mac 上，不在设备里。** 模拟器与宿主共享网络栈，所以
-`127.0.0.1` 直达；真机不行，而 dsh 出于安全拒绝绑 `0.0.0.0`（原话："it would
-expose remote code execution to the network"），所以真机不是改个 IP 的事。
+`127.0.0.1` 直达；真机上那是手机自己，见下一节。
+
+### 装到真机上
+
+```bash
+cd ios && ./deploy-device.sh
+```
+
+**前置条件，而且只能你自己做一次**：Xcode → Settings → Accounts 登录 Apple ID。
+自动签名要靠这个账号去创建 App ID 和描述文件；钥匙串里有开发证书是不够的，
+没登录会报 `No Account for Team "…"`。
+
+装上之后手机上可能还要：设置 → 通用 → VPN与设备管理 → 开发者App → 信任。
+
+**然后要解决地址问题。** 真机上默认的 `127.0.0.1` 指的是手机自己，必然连不上，
+app 会自动弹出连接设置让你填 Mac 的局域网地址。Mac 那边要把 host 起在局域网上
+（`ipconfig getifaddr en0` 拿到 IP）：
+
+```bash
+dsh --profile mobile-web --host 192.168.1.9 --port 7799 --no-open --trusted-host 192.168.1.9:7799
+```
+
+`--trusted-host` 是必须的：`/api` 有一道浏览器信任围栏，只认它认可的 authority，
+手机过来的 Host 头是 `<Mac IP>:7799`，不加就被挡。
+
+> **这会把 dsh 的接口暴露给同一个局域网，而 dsh 能执行代码。** dsh 拒绝绑
+> `0.0.0.0`（原话："it would expose remote code execution to the network"），
+> 绑一个具体的局域网 IP 是它允许的口子，但暴露面是一样的——用完就停掉，
+> 别在公共 Wi-Fi 或不受控的办公网上开着。真正干净的解法是设备内 runtime。
+
+连上之后想改地址：**摇一摇**，或者点开一条 `dshmobile://settings` 链接
+（`?url=` 可以直接把地址填好）。
 
 最终形态是设备内跑一个 jitless 的 Node、host 监听 app 自己的 loopback 端口——
 计划在 [`docs/superpowers/plans/2026-09-04-node-ios-build.md`](docs/superpowers/plans/2026-09-04-node-ios-build.md)。
@@ -235,6 +265,12 @@ WebView 面对的都是同一个 loopback HTTP + WebSocket 端点，加载同一
   对账就是为了兜住这一点，但它依赖 dsh 装在 Homebrew 的默认路径，
   换路径就会 skip。
 - **底部 sheet 只能点把手关闭，不能下拉。** 没做拖拽手势。
+- **真机上开了 `NSAllowsArbitraryLoads`。** 用户填的局域网地址是明文 HTTP，
+  而 `NSAllowsLocalNetworking` 覆盖不到 `192.168.x.x`（它只放行无限定主机名、
+  `.local` 和链路本地地址）。这个 app 只加载用户填的那一个 URL，所以放开的面
+  就是那一个地址；设备内 runtime 落地后地址回到自己的 loopback，这条该删。
+- **摇一摇叫设置没测过。** 无头环境触发不了摇动手势。可测的那条入口是
+  `dshmobile://settings`，已验证；真机上摇一摇如果不灵，用它兜底。
 - **`glob` / `grep` 是重新实现的。** 输出格式复用 dsh 自己的导出，工具定义有
   parity 测试逐字段守住；与真实 ripgrep 的差分测试覆盖了 glob 方言、两个工具
   各自不同的忽略语义、排序，以及 `.gitignore`。

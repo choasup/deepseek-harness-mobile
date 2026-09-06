@@ -5,8 +5,10 @@ import WebKit
 ///
 /// ## 现在这一版连的是哪儿
 ///
-/// Mac 上跑的 `dsh --profile mobile-web`（loopback）。模拟器与宿主共享网络栈，
-/// 所以 `127.0.0.1` 直达 Mac——真机则不行，需要另一套方案。
+/// Mac 上跑的 `dsh --profile mobile-web`。模拟器与宿主共享网络栈，所以默认的
+/// `127.0.0.1` 直达 Mac；**真机上那是手机自己**，必须填 Mac 的局域网地址，
+/// 由 `EndpointSettingsViewController` 在设备上输入（连不上时自动弹出，
+/// 平时摇一摇也能叫出来）。
 ///
 /// ## 为什么先做成这样
 ///
@@ -23,6 +25,20 @@ final class HarnessViewController: UIViewController {
     private var webView: WKWebView!
     private let statusLabel = UILabel()
     private let retryButton = UIButton(type: .system)
+    private let settingsButton = UIButton(type: .system)
+    /// 只主动弹一次设置，之后由用户点"改地址"或摇一摇——
+    /// 否则重试失败会把设置界面反复推上来，连"重试"都点不着。
+    private var hasOfferedSettings = false
+
+    /// 摇一摇叫出连接设置。真机上这是**已经连上之后**改地址的唯一入口——
+    /// 界面整个被 WebView 占满，没有别的地方放这个入口；而换 Mac、换网段
+    /// 之后必然要改。
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return }
+        presentSettings()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -54,6 +70,12 @@ final class HarnessViewController: UIViewController {
         retryButton.isHidden = true
         view.addSubview(retryButton)
 
+        settingsButton.setTitle("改地址", for: .normal)
+        settingsButton.addTarget(self, action: #selector(presentSettings), for: .touchUpInside)
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        settingsButton.isHidden = true
+        view.addSubview(settingsButton)
+
         NSLayoutConstraint.activate([
             webView.topAnchor.constraint(equalTo: view.topAnchor),
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -67,6 +89,10 @@ final class HarnessViewController: UIViewController {
 
             retryButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 16),
             retryButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+
+            settingsButton.topAnchor.constraint(equalTo: retryButton.bottomAnchor, constant: 8),
+            settingsButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            settingsButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
 
         load()
@@ -74,13 +100,53 @@ final class HarnessViewController: UIViewController {
 
     @objc private func load() {
         retryButton.isHidden = true
+        settingsButton.isHidden = true
         statusLabel.text = "正在连接 \(HarnessEndpoint.current.absoluteString)…"
         webView.isHidden = true
         webView.load(URLRequest(url: HarnessEndpoint.current))
     }
+
+    @objc private func presentSettings() {
+        openSettings(preset: nil)
+    }
+
+    /// `preset` 非空时预填地址（来自 `dshmobile://settings?url=…`）。
+    func openSettings(preset: String?) {
+        guard presentedViewController == nil else { return }
+        let settings = EndpointSettingsViewController()
+        settings.preset = preset
+        settings.onConnect = { [weak self] _ in self?.load() }
+        present(settings, animated: true)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
 }
 
 extension HarnessViewController: WKNavigationDelegate {
+    /// 只有网络错误是不够的：在有 HTTP 代理的网络里，连不通的地址不会报错，
+    /// 代理会替它返回一个自己的错误页（实测：公司网络对一个不可达 IP 返回
+    /// 502 的 IT 提示页）。那样 `didFail` 根本不触发，app 以为加载成功，
+    /// 用户看到的是一张跟 dsh 毫无关系的页面，而且没有入口回到设置。
+    /// 所以这里按状态码判：非 2xx 一律当失败处理。
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        guard navigationResponse.isForMainFrame,
+              let http = navigationResponse.response as? HTTPURLResponse,
+              !(200...299).contains(http.statusCode)
+        else {
+            decisionHandler(.allow)
+            return
+        }
+        decisionHandler(.cancel)
+        showFailure(HarnessLoadError.badStatus(http.statusCode))
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         statusLabel.text = nil
         retryButton.isHidden = true
@@ -101,16 +167,48 @@ extension HarnessViewController: WKNavigationDelegate {
 
     /// 连不上时说清楚**该去查什么**，而不是只显示一个 NSError。
     /// 这一层最常见的失败就是 Mac 上的 host 没在跑，报错本身看不出这一点。
+    /// 取消导航会让 WebKit 再报一次 `didFailProvisionalNavigation`
+    /// （NSURLErrorCancelled）。那条是我们自己造成的，把它盖在真正的原因上
+    /// 只会误导——所以忽略。
+    private func isSelfInflictedCancel(_ error: Error) -> Bool {
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+    }
+
     private func showFailure(_ error: Error) {
+        if isSelfInflictedCancel(error) { return }
         webView.isHidden = true
         retryButton.isHidden = false
+        settingsButton.isHidden = false
         statusLabel.text = """
         连不上 \(HarnessEndpoint.current.absoluteString)
 
         \(error.localizedDescription)
 
-        这一版的 runtime 还在 Mac 上。请确认那边跑着：
-        dsh --profile mobile-web --port \(HarnessEndpoint.current.port ?? 7799)
+        这一版的 runtime 还在 Mac 上。真机要填 Mac 的**局域网**地址——
+        默认的 127.0.0.1 在手机上指的是手机自己。
+
+        （连上之后想改地址：摇一摇。）
         """
+
+        // 首次失败直接把设置推到脸上：真机上这一步是必然会遇到的，
+        // 让用户自己去猜"该点哪"没有意义。
+        if !hasOfferedSettings {
+            hasOfferedSettings = true
+            presentSettings()
+        }
+    }
+}
+
+/// 加载失败的原因里，有一类不是 URLSession 报的错，而是我们自己判定的。
+enum HarnessLoadError: LocalizedError {
+    /// 服务器答了，但不是 2xx——多半是代理的错误页，不是 dsh。
+    case badStatus(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case let .badStatus(code):
+            return "服务器返回 HTTP \(code)，不是 dsh 的页面（多半是网络里的代理替它答的）。"
+        }
     }
 }

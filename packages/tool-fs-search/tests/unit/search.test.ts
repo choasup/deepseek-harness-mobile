@@ -35,7 +35,7 @@ const nodeFs: SearchFs = {
 
 const VCS = ['.git', '.svn', '.hg', '.bzr', '.jj', '.sl'] as const
 const opts = (over: Partial<WalkOptions> = {}): WalkOptions =>
-  ({ excludeDirs: VCS, skipHidden: false, limits: DEFAULT_LIMITS, ...over })
+  ({ excludeDirs: VCS, skipHidden: false, respectGitignore: false, limits: DEFAULT_LIMITS, ...over })
 
 let root: string
 

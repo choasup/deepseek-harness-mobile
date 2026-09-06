@@ -104,8 +104,14 @@ pnpm add file:<仓库路径>/packages/mobile-app \
 - **没有本地沙箱。** iOS 的 app 容器本身就是边界。`ShellRunResult.sandbox` 不填、
   `sandboxMode` 返回 `undefined`——宁可什么都不声称，也不声称一个假的约束。
 - **`glob` / `grep` 是重新实现的。** 输出格式复用 dsh 自己的导出，工具定义有
-  parity 测试逐字段守住；与真实 ripgrep 的差分测试覆盖了方言、忽略语义与排序。
-  但**不支持 `.gitignore`**——dsh 的 `grep` 走 ripgrep 默认行为是遵守它的。
+  parity 测试逐字段守住；与真实 ripgrep 的差分测试覆盖了 glob 方言、两个工具
+  各自不同的忽略语义、排序，以及 `.gitignore`。
+
+  `.gitignore` **支持常用语义**：`#` 注释、`!` 否定（后出现的覆盖先出现的）、
+  `foo/` 只匹配目录、`/foo` 锚定、不含 `/` 的模式在任意深度匹配、嵌套
+  `.gitignore` 作用于自己的子树。**不支持**：`\` 转义、全局 `~/.gitignore`
+  与 `.git/info/exclude`、ripgrep 特有的 `.ignore` / `.rgignore`，以及 git
+  的"已跟踪文件不受 ignore 影响"（这里没有 git 索引，无从判断）。
 
 ## 开发
 

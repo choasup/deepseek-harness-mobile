@@ -164,9 +164,11 @@ export function apply(ctx: Context, config: JsFsSearchConfig): void {
       const input = parseGlobArgs(args)
       const root = input.path ?? process.cwd()
       const { paths } = await globSearch(fs, root, input.pattern, {
-        // glob 传 --hidden：搜隐藏文件。与 grep 相反，见下。
+        // glob 传 --no-ignore --hidden：既搜隐藏文件，也**不**遵守 .gitignore。
+        // 与 grep 完全相反，见下——这是从 dsh 实际传给 ripgrep 的 argv 读出来的。
         excludeDirs: GLOB_VCS_EXCLUDES,
         skipHidden: false,
+        respectGitignore: false,
         limits,
         signal: exec.signal,
       })
@@ -230,10 +232,11 @@ export function apply(ctx: Context, config: JsFsSearchConfig): void {
       const input = parseGrepArgs(args)
       const root = input.path ?? process.cwd()
       const { matches } = await grepSearch(fs, root, input.pattern, {
-        // grep 不传 --hidden：走 ripgrep 默认，跳过隐藏文件。与 glob 相反——
-        // 这是从 dsh 实际传给 ripgrep 的 argv 里读出来的，不是猜的。
+        // grep 什么忽略相关的 flag 都不传，走 ripgrep 默认：跳过隐藏文件
+        // **且遵守 .gitignore**。与 glob 完全相反。
         excludeDirs: GLOB_VCS_EXCLUDES,
         skipHidden: true,
+        respectGitignore: true,
         limits,
         signal: exec.signal,
         include: input.include,

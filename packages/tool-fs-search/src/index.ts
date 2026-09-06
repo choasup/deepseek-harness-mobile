@@ -8,6 +8,8 @@
 export {
   DEFAULT_LIMITS, emptyStats, globSearch, grepSearch, looksBinary, normalizeGlob, walkFiles,
 } from './search.ts'
+export { isIgnored, parseGitignore } from './gitignore.ts'
+export type { IgnoreLayer, IgnoreRule } from './gitignore.ts'
 export type {
   GrepMatch, GrepOptions, SearchDirEntry, SearchFs, SearchLimits, WalkOptions, WalkStats,
 } from './search.ts'

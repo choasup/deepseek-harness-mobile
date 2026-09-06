@@ -15,6 +15,7 @@
  * 是为了可移植。
  */
 import path from 'node:path'
+import { isIgnored, parseGitignore, type IgnoreLayer } from './gitignore.ts'
 
 /** 搜索引擎需要的最小文件系统面。plugin 用 `ctx.fs` 实现，测试里用 `node:fs`。 */
 export interface SearchFs {
@@ -60,6 +61,16 @@ export interface WalkOptions {
   /** 不进入的目录名（dsh 的 `GLOB_VCS_EXCLUDES`）。 */
   excludeDirs: readonly string[]
   /**
+   * 遵守 `.gitignore`（含嵌套的）。
+   *
+   * 两个工具在这一点上也不同，同样是从 dsh 传给 ripgrep 的 argv 读出来的：
+   * - `glob` 传 `--no-ignore`，**不遵守**（`respectGitignore: false`）
+   * - `grep` 不传，走 ripgrep 默认，**遵守**（`respectGitignore: true`）
+   *
+   * 支持范围见 `gitignore.ts` 的文件头。
+   */
+  respectGitignore: boolean
+  /**
    * 跳过以 `.` 开头的文件与目录。
    *
    * dsh 的两个工具在这一点上**行为不同**，是从它实际传给 ripgrep 的参数
@@ -79,13 +90,15 @@ export interface WalkStats {
   skippedTooLarge: number
   skippedBinary: number
   skippedSymlink: number
+  /** 被 .gitignore 排除的条目数——如实报告"有东西没被搜"，而不是静默丢弃。 */
+  skippedIgnored: number
   hitWalkCap: boolean
 }
 
 export function emptyStats(): WalkStats {
   return {
     filesSeen: 0, dirsSeen: 0,
-    skippedTooLarge: 0, skippedBinary: 0, skippedSymlink: 0,
+    skippedTooLarge: 0, skippedBinary: 0, skippedSymlink: 0, skippedIgnored: 0,
     hitWalkCap: false,
   }
 }
@@ -106,13 +119,13 @@ export async function* walkFiles(
   shouldStop: () => boolean = () => false,
 ): AsyncGenerator<string> {
   const exclude = new Set(options.excludeDirs)
-  const stack: string[] = ['']
+  const stack: Array<{ rel: string; layers: readonly IgnoreLayer[] }> = [{ rel: '', layers: [] }]
   let entries = 0
 
   while (stack.length > 0) {
     if (shouldStop()) return
     options.signal?.throwIfAborted()
-    const rel = stack.pop()!
+    const { rel, layers: inheritedLayers } = stack.pop()!
     let listing: readonly SearchDirEntry[]
     try {
       listing = await fs.listDir(rel === '' ? root : path.join(root, rel))
@@ -126,7 +139,24 @@ export async function* walkFiles(
     // 而子目录要**倒序**压栈（栈是后进先出，倒序压入才能按字典序弹出）。
     // 这两件事方向相反，必须分开做——写成一个倒序循环会让文件顺序反掉。
     const sorted = [...listing].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    const subdirs: string[] = []
+
+    // 进入一个目录时先读它自己的 .gitignore，这一层对整棵子树生效。
+    // DFS 天然支持嵌套：层栈随下降增长、随回溯收缩。
+    let layers = inheritedLayers
+    if (options.respectGitignore && sorted.some((e) => e.name === '.gitignore' && !e.isDirectory)) {
+      try {
+        const bytes = await fs.readBytes(
+          path.join(root, rel === '' ? '.gitignore' : `${rel}/.gitignore`),
+          options.limits.maxFileBytes,
+        )
+        const rules = parseGitignore(new TextDecoder('utf-8', { fatal: false }).decode(bytes))
+        if (rules.length > 0) layers = [...layers, { base: rel, rules }]
+      } catch {
+        // 读不了就当没有——一个坏掉的 .gitignore 不该让整次搜索失败。
+      }
+    }
+
+    const subdirs: Array<{ rel: string; layers: readonly IgnoreLayer[] }> = []
     for (const entry of sorted) {
       entries += 1
       if (entries > options.limits.maxWalkEntries) {
@@ -139,8 +169,12 @@ export async function* walkFiles(
       }
       if (options.skipHidden && entry.name.startsWith('.')) continue
       const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`
+      if (options.respectGitignore && isIgnored(childRel, entry.isDirectory, layers)) {
+        stats.skippedIgnored += 1
+        continue
+      }
       if (entry.isDirectory) {
-        if (!exclude.has(entry.name)) subdirs.push(childRel)
+        if (!exclude.has(entry.name)) subdirs.push({ rel: childRel, layers })
         continue
       }
       stats.filesSeen += 1
@@ -169,6 +203,34 @@ export function normalizeGlob(pattern: string): string {
   return body.includes('/') ? pattern : `**/${pattern}`
 }
 
+/**
+ * 让 `*` 能匹配以 `.` 开头的文件——这是第四处方言差异（实测 ripgrep 15.0.0）：
+ *
+ * | | `.gitignore` | `a.ts` |
+ * | --- | --- | --- |
+ * | `path.matchesGlob(p, '*')` | **false** | true |
+ * | ripgrep `--glob='*'` | 匹配 | 匹配 |
+ *
+ * `path.matchesGlob` 沿用 shell 语义（`*` 不跨前导点），而 gitignore / ripgrep
+ * 不特殊对待点。dsh 给 glob 传了 `--hidden`，系统提示词也明说
+ * "include hidden and ignored files"——**模型期待 `*` 找得到 dotfile**，
+ * 而 `*` 恰恰是最常写的模式。
+ *
+ * 做法：把路径与模式**同时**做一次对称变换，把每段的前导 `.` 换成一个哨兵
+ * 字符。`*` 能匹配哨兵，于是 `*` 覆盖了 dotfile；而模式里显式写的 `.foo`
+ * 也被换成 `<哨兵>foo`，仍然只精确匹配它自己。变换是对称的，所以不会引入
+ * 任何原本不成立的匹配。
+ */
+const DOT_SENTINEL = '\u0001'
+function unhide(value: string): string {
+  return value.replace(/(^|\/)\./g, `$1${DOT_SENTINEL}`)
+}
+
+/** 按 ripgrep / gitignore 的语义做 glob 匹配（`*` 跨前导点）。 */
+export function matchesGlobLikeRipgrep(relPath: string, pattern: string): boolean {
+  return path.matchesGlob(unhide(relPath), unhide(pattern))
+}
+
 /** 判定二进制：前若干字节里有 NUL 就当二进制（ripgrep 同样的启发式）。 */
 export function looksBinary(bytes: Uint8Array): boolean {
   return bytes.includes(0)
@@ -189,7 +251,7 @@ export async function globSearch(
   const stats = emptyStats()
   const hits: string[] = []
   for await (const rel of walkFiles(fs, root, options, stats)) {
-    if (path.matchesGlob(rel, normalizeGlob(pattern))) hits.push(rel)
+    if (matchesGlobLikeRipgrep(rel, normalizeGlob(pattern))) hits.push(rel)
   }
 
   // dsh 传给 ripgrep 的是 `--sort=modified`，**不是按路径排**。
@@ -236,7 +298,7 @@ export async function grepSearch(
   const done = () => matches.length >= options.maxMatches
   for await (const rel of walkFiles(fs, root, options, stats, done)) {
     if (done()) break
-    if (options.include !== undefined && !path.matchesGlob(rel, normalizeGlob(options.include))) continue
+    if (options.include !== undefined && !matchesGlobLikeRipgrep(rel, normalizeGlob(options.include))) continue
 
     let bytes: Uint8Array
     try {

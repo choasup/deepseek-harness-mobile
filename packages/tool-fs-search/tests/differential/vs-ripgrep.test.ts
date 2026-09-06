@@ -42,8 +42,8 @@ const nodeFs: SearchFs = {
 
 const VCS = ['.git', '.svn', '.hg', '.bzr', '.jj', '.sl'] as const
 // glob 传 --hidden（搜隐藏文件）；grep 不传（跳过）。两者语义不同。
-const globOpts = { excludeDirs: VCS, skipHidden: false, limits: DEFAULT_LIMITS }
-const grepOpts = { excludeDirs: VCS, skipHidden: true, limits: DEFAULT_LIMITS }
+const globOpts = { excludeDirs: VCS, skipHidden: false, respectGitignore: false, limits: DEFAULT_LIMITS }
+const grepOpts = { excludeDirs: VCS, skipHidden: true, respectGitignore: true, limits: DEFAULT_LIMITS }
 
 let root: string
 
@@ -57,6 +57,16 @@ beforeAll(() => {
   writeFileSync(join(root, 'src/d.md'), 'TODO in markdown\n')
   writeFileSync(join(root, 'cjk.txt'), '中文 TODO 行\n普通行\n')
   writeFileSync(join(root, '.git/hidden'), 'TODO must not appear\n')
+  // gitignore 场景：根规则 + 嵌套规则 + 否定
+  mkdirSync(join(root, 'node_modules/pkg'), { recursive: true })
+  mkdirSync(join(root, 'pkg'), { recursive: true })
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n*.log\n!keep.log\n')
+  writeFileSync(join(root, 'node_modules/pkg/dep.ts'), 'TODO in dep\n')
+  writeFileSync(join(root, 'noisy.log'), 'TODO in log\n')
+  writeFileSync(join(root, 'keep.log'), 'TODO kept\n')
+  writeFileSync(join(root, 'pkg/.gitignore'), 'inner.txt\n')
+  writeFileSync(join(root, 'pkg/inner.txt'), 'TODO inner\n')
+  writeFileSync(join(root, 'pkg/outer.txt'), 'TODO outer\n')
   writeFileSync(join(root, 'bin.dat'), Buffer.from([0x54, 0x4f, 0x44, 0x4f, 0x00, 0xff]))
 })
 
@@ -135,5 +145,29 @@ describe.skipIf(!ready)('与真实 ripgrep 的差分对照', () => {
       expect(set.some((m) => m.path.includes('.git'))).toBe(false)
       expect(set.some((m) => m.path === 'bin.dat')).toBe(false)
     }
+  })
+
+  it('grep 遵守 .gitignore，且与 ripgrep 逐条一致', async () => {
+    // ripgrep 才是 gitignore 语义的权威——目录规则、否定、嵌套三样一次比清楚。
+    const mine = (await grepSearch(nodeFs, root, 'TODO', { ...grepOpts, maxMatches: 250 })).matches
+    const theirs = rgGrep('TODO')
+    expect(mine.map(key).sort()).toEqual(theirs.map(key).sort())
+  })
+
+  it('被忽略的目录、匹配的后缀、以及嵌套规则都没被搜到', async () => {
+    const mine = (await grepSearch(nodeFs, root, 'TODO', { ...grepOpts, maxMatches: 250 })).matches
+    const paths = new Set(mine.map((m) => m.path))
+    expect(paths.has('node_modules/pkg/dep.ts'), 'node_modules/ 应被忽略').toBe(false)
+    expect(paths.has('noisy.log'), '*.log 应被忽略').toBe(false)
+    expect(paths.has('pkg/inner.txt'), '嵌套 .gitignore 应生效').toBe(false)
+    expect(paths.has('keep.log'), '!keep.log 应把它放回来').toBe(true)
+    expect(paths.has('pkg/outer.txt'), '未被任何规则命中的应保留').toBe(true)
+  })
+
+  it('glob 相反：不遵守 .gitignore（dsh 给它传了 --no-ignore）', async () => {
+    const mine = (await globSearch(nodeFs, root, '**/*.log', globOpts)).paths
+    const theirs = rgGlob('**/*.log')
+    expect([...mine].sort()).toEqual([...theirs].sort())
+    expect(mine, 'glob 应当看得见被 gitignore 排除的文件').toContain('noisy.log')
   })
 })

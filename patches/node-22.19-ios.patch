@@ -266,6 +266,57 @@ index 5e0ccc94..f2d2ce6c 100644
              # -force_load or --whole-archive are not applicable for
              # the static library
              [ 'force_load=="true"', {
+diff --git a/src/crypto/crypto_context.cc b/src/crypto/crypto_context.cc
+index 5e368e3f..abeacef5 100644
+--- a/src/crypto/crypto_context.cc
++++ b/src/crypto/crypto_context.cc
+@@ -19,6 +19,19 @@
+ #include <openssl/engine.h>
+ #endif  // !OPENSSL_NO_ENGINE
+ #ifdef __APPLE__
++#include <TargetConditionals.h>
++// dsh-mobile: 读系统信任库这一段用的是 SecTrustSettings* 系列 API
++// （kSecTrustSettingsDomainUser、kSecTrustSettingsResult…），**只有 macOS 有**，
++// iOS 的 Security 框架不提供。而上游的守卫是 __APPLE__，iOS 也满足，
++// 于是交叉编译时报一串 "use of undeclared identifier"。
++// iOS 上关掉即可：--use-system-ca 拿不到系统证书，回落到 Node 自带的根证书，
++// 那本来就是默认行为。
++#if !TARGET_OS_IPHONE
++#define DSH_HAS_MACOS_KEYCHAIN 1
++#endif
++#endif
++
++#ifdef DSH_HAS_MACOS_KEYCHAIN
+ #include <Security/Security.h>
+ #endif
+ 
+@@ -304,7 +317,7 @@ bool isSelfIssued(X509* cert) {
+ // Licensed under a BSD-style license
+ // See https://chromium.googlesource.com/chromium/src/+/HEAD/LICENSE for
+ // details.
+-#ifdef __APPLE__
++#ifdef DSH_HAS_MACOS_KEYCHAIN
+ TrustStatus IsTrustDictionaryTrustedForPolicy(CFDictionaryRef trust_dict,
+                                               bool is_self_issued) {
+   // Trust settings may be scoped to a single application
+@@ -531,7 +544,7 @@ void ReadMacOSKeychainCertificates(
+   }
+   CFRelease(curr_anchors);
+ }
+-#endif  // __APPLE__
++#endif  // DSH_HAS_MACOS_KEYCHAIN
+ 
+ #ifdef _WIN32
+ 
+@@ -792,7 +805,7 @@ static std::vector<X509*>& GetBundledRootCertificates() {
+ 
+ static std::vector<X509*> InitializeSystemStoreCertificates() {
+   std::vector<X509*> system_store_certs;
+-#ifdef __APPLE__
++#ifdef DSH_HAS_MACOS_KEYCHAIN
+   ReadMacOSKeychainCertificates(&system_store_certs);
+ #endif
+ #ifdef _WIN32
 diff --git a/tools/gyp/pylib/gyp/generator/make.py b/tools/gyp/pylib/gyp/generator/make.py
 index 7118492e..1c4e0cc6 100644
 --- a/tools/gyp/pylib/gyp/generator/make.py

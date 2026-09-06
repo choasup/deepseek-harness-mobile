@@ -341,3 +341,24 @@ libnode.target.mk       iPhoneOS26.4.sdk  ← 目标库编成 iOS 二进制
 
 **这条规则大概是整份笔记里最值钱的一句**：gyp 的两层条件不是"作用域大小"的
 区别，是**求值先后**的区别，而错误信息永远不会提到这一点。
+
+### 3.12 失败 #8：iOS 的 Security 框架没有 SecTrustSettings
+
+```
+crypto_context.cc:352: error: use of undeclared identifier 'kSecTrustSettingsResult'
+crypto_context.cc:452: error: use of undeclared identifier 'kSecTrustSettingsDomainUser'
+```
+
+Node 22 的 `--use-system-ca` 会去读系统信任库，用的是 `SecTrustSettings*` 系列
+API——**只有 macOS 有**，iOS 的 Security 框架不提供。上游的守卫是 `#ifdef
+__APPLE__`，而 iOS 也满足。
+
+解法：引入 `DSH_HAS_MACOS_KEYCHAIN`，用 `TargetConditionals.h` 的
+`TARGET_OS_IPHONE` 把它挡在 iOS 之外，替换三处守卫（include、实现块、调用点）。
+
+**功能上的代价是明确且可接受的**：iOS 上 `--use-system-ca` 拿不到系统证书，
+回落到 Node 自带的根证书——那本来就是默认行为，我们也没打算用系统信任库。
+
+这是本次构建第四个"平台假设写死在 `__APPLE__` 里"的问题
+（前三个：zlib 的 `TARGET_OS_MAC`、c-ares 的 darwin 配置、gyp 生成器只认 mac）。
+**`__APPLE__` 在 iOS 上为真，是这整类问题的共同来源。**

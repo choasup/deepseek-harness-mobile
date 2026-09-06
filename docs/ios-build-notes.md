@@ -282,3 +282,32 @@ ares_rand.c: fatal error: 'sys/random.h' file not found
 **模式识别**：这是本次构建里第三个"新 SDK / 新平台 × 老第三方配置"的问题
 （前两个是 zlib 的经典 Mac 分支、gyp 生成器只认 mac）。共同形态是
 **某个平台假设被写死在一个第三方目录里**，而错误信息指向使用点、不指向假设。
+
+### 3.9 失败 #6（自己造的）：修 #5 时把 #3 的修复顶掉了
+
+按 toolset 拆开之后，ncrypto 的 `operator<=>` 又编不过了。原因是我顺手把
+`CLANG_CXX_LANGUAGE_STANDARD` 一起挪进了 `target_conditions`——而
+**`target_conditions` 的求值晚于 `common_node.gypi` 给 Node 核心设的 gnu++20**，
+放在那里等于把它顶回 gnu++17。
+
+规律记下来：
+
+| 放哪 | 什么时候用 |
+|---|---|
+| `conditions` | 要和别处的设置**叠加**（如 C++ 标准，会被 common_node.gypi 再覆盖） |
+| `target_conditions` | 要按 `_toolset` / `_type` 分流（如 SDKROOT、部署目标） |
+
+把 SDK / 部署目标留在 `target_conditions`、把 C++ 标准放回 `conditions`，
+两个修复才同时成立：
+
+```
+out/deps/ncrypto/ncrypto.target.mk  → -std=gnu++20
+out/node_js2c.host.mk               → MacOSX26.4.sdk
+```
+
+### 3.10 关于 `vendor/node-22` 的提交
+
+移植过程有一次 `git commit` 打进了 `vendor/node-22` 自己的仓库（当时 shell 的
+cwd 还在里面）。**没有纠正它**——这个 scratch clone 本来就不入库，而这样一来
+移植成果被固定成了两个 commit，`git diff HEAD~2 HEAD` 就是完整补丁，
+比维护一份手工导出的 diff 更可靠。

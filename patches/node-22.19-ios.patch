@@ -1,5 +1,5 @@
 diff --git a/common.gypi b/common.gypi
-index 7780ae10..6747338e 100644
+index 7780ae10..e91fc892 100644
 --- a/common.gypi
 +++ b/common.gypi
 @@ -108,7 +108,7 @@
@@ -38,7 +38,7 @@ index 7780ae10..6747338e 100644
          'xcode_settings': {
            'OTHER_CFLAGS+': [
              '-fno-omit-frame-pointer',
-@@ -690,6 +690,69 @@
+@@ -690,6 +690,86 @@
            }],
          ],
        }],
@@ -47,33 +47,60 @@ index 7780ae10..6747338e 100644
 +      #   -fembed-bitcode / ENABLE_BITCODE —— bitcode 自 Xcode 14 起废弃并移除
 +      #   -Wl,-no_pie                      —— 现代 iOS 强制 PIE
 +      #   IPHONEOS_DEPLOYMENT_TARGET 13.0  —— 抬到 17.0，与外壳 app 对齐
++      #
++      # **所有设置都必须按 toolset 分开。** 交叉编译时 gyp 会同时构建两套东西：
++      # target（跑在 iPhone 上的库）和 host（跑在这台 Mac 上的代码生成工具，
++      # 如 node_js2c、mksnapshot、torque）。把 iOS 的 SDK 与部署目标施加到
++      # host 上，产出的工具就是 iOS 二进制，macOS 会直接 SIGKILL 它：
++      #     /bin/sh: line 1: 15988 Killed: 9   .../node_js2c ...
++      #     make[1]: *** [.../node_javascript.cc] Error 137
++      # 报错里只有 "Killed: 9"，不提平台——用 `vtool -show-build` 看那个工具，
++      # 会发现 platform IOS。
 +      ['OS=="ios"', {
-+        'defines': ['_DARWIN_USE_64_BIT_INODE=1'],
-+        'xcode_settings': {
-+          'ALWAYS_SEARCH_USER_PATHS': 'NO',
-+          'GCC_CW_ASM_SYNTAX': 'NO',                # No -fasm-blocks
-+          'GCC_DYNAMIC_NO_PIC': 'NO',               # No -mdynamic-no-pic
-+                                                    # (Equivalent to -fPIC)
-+          'GCC_ENABLE_CPP_EXCEPTIONS': 'NO',        # -fno-exceptions
-+          'GCC_ENABLE_CPP_RTTI': 'NO',              # -fno-rtti
-+          'GCC_ENABLE_PASCAL_STRINGS': 'NO',        # No -mpascal-strings
-+          'GCC_STRICT_ALIASING': 'NO',              # -fno-strict-aliasing
-+          'PREBINDING': 'NO',                       # No -Wl,-prebind
-+          'IPHONEOS_DEPLOYMENT_TARGET': '17.0',
-+          'USE_HEADERMAP': 'NO',
-+          # dsh-mobile: 关掉调试符号。实测 Node 18 那轮单架构 out/ 涨到 20 GB，
-+          # 而这台机器只有十几 GB 可用；V8 的 debug info 是其中大头。
-+          # 我们要的是能在设备上跑的静态库，不是能在 lldb 里单步的静态库——
-+          # 真要调试再单独开一轮。
-+          'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
-+          'WARNING_CFLAGS': [
-+            '-Wall',
-+            '-Wendif-labels',
-+            '-W',
-+            '-Wno-unused-parameter',
-+          ],
-+        },
 +        'target_conditions': [
++          ['_toolset=="target"', {
++            'defines': ['_DARWIN_USE_64_BIT_INODE=1'],
++            'xcode_settings': {
++              'ALWAYS_SEARCH_USER_PATHS': 'NO',
++              'GCC_CW_ASM_SYNTAX': 'NO',                # No -fasm-blocks
++              'GCC_DYNAMIC_NO_PIC': 'NO',               # No -mdynamic-no-pic
++              'GCC_ENABLE_CPP_EXCEPTIONS': 'NO',        # -fno-exceptions
++              'GCC_ENABLE_CPP_RTTI': 'NO',              # -fno-rtti
++              'GCC_ENABLE_PASCAL_STRINGS': 'NO',        # No -mpascal-strings
++              'GCC_STRICT_ALIASING': 'NO',              # -fno-strict-aliasing
++              'PREBINDING': 'NO',                       # No -Wl,-prebind
++              'IPHONEOS_DEPLOYMENT_TARGET': '17.0',
++              'USE_HEADERMAP': 'NO',
++              # 关掉调试符号：单架构 Node+V8 带符号实测 20 GB，这台机器放不下。
++              'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
++              'ARCHS': ['arm64'],
++              'WARNING_CFLAGS': [
++                '-Wall',
++                '-Wendif-labels',
++                '-W',
++                '-Wno-unused-parameter',
++              ],
++            },
++            'conditions': [
++              ['iossim=="true"', {
++                'xcode_settings': {'SDKROOT': 'iphonesimulator'},
++              }, {
++                'xcode_settings': {'SDKROOT': 'iphoneos'},
++              }],
++            ],
++          }],
++          # host 工具跑在这台 Mac 上，必须按 macOS 编。
++          # IPHONEOS_DEPLOYMENT_TARGET 置空是有意的：xcode_emulation 里
++          # `_AppendPlatformVersionMinFlags` 判的是"存在且非空"，置空才会落到
++          # macOS 分支去发 -mmacosx-version-min。
++          ['_toolset=="host"', {
++            'xcode_settings': {
++              'SDKROOT': 'macosx',
++              'IPHONEOS_DEPLOYMENT_TARGET': '',
++              'MACOSX_DEPLOYMENT_TARGET': '11.0',
++              'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
++            },
++          }],
 +          ['_type!="static_library"', {
 +            'xcode_settings': {
 +              'OTHER_LDFLAGS': [
@@ -82,26 +109,16 @@ index 7780ae10..6747338e 100644
 +            },
 +          }],
 +        ],
++        # C++ 标准必须放在这一层，**不能**放进上面的 target_conditions：
++        # target_conditions 的求值晚于 common_node.gypi 给 Node 核心设的
++        # gnu++20，放在那里会把它顶回 gnu++17，ncrypto 的 operator<=> 就又编不过。
 +        'conditions': [
-+          ['target_arch=="arm64"', {
-+            'xcode_settings': {'ARCHS': ['arm64']},
-+          }],
-+          ['target_arch=="x64"', {
-+            'xcode_settings': {'ARCHS': ['x86_64']},
-+          }],
 +          ['clang==1', {
 +            'xcode_settings': {
 +              'GCC_VERSION': 'com.apple.compilers.llvm.clang.1_0',
 +              'CLANG_CXX_LANGUAGE_STANDARD': 'gnu++17',  # -std=gnu++17
 +              'CLANG_CXX_LIBRARY': 'libc++',
 +            },
-+          }],
-+          # 模拟器与真机是不同的 SDK。iossim 由 configure.py 从
-+          # --ios-simulator 传下来。
-+          ['iossim=="true"', {
-+            'xcode_settings': {'SDKROOT': 'iphonesimulator'},
-+          }, {
-+            'xcode_settings': {'SDKROOT': 'iphoneos'},
 +          }],
 +        ],
 +      }],

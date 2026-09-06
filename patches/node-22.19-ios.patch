@@ -1,5 +1,5 @@
 diff --git a/common.gypi b/common.gypi
-index 7780ae10..e91fc892 100644
+index 7780ae10..6edf6e92 100644
 --- a/common.gypi
 +++ b/common.gypi
 @@ -108,7 +108,7 @@
@@ -38,7 +38,7 @@ index 7780ae10..e91fc892 100644
          'xcode_settings': {
            'OTHER_CFLAGS+': [
              '-fno-omit-frame-pointer',
-@@ -690,6 +690,86 @@
+@@ -690,6 +690,100 @@
            }],
          ],
        }],
@@ -48,38 +48,59 @@ index 7780ae10..e91fc892 100644
 +      #   -Wl,-no_pie                      —— 现代 iOS 强制 PIE
 +      #   IPHONEOS_DEPLOYMENT_TARGET 13.0  —— 抬到 17.0，与外壳 app 对齐
 +      #
-+      # **所有设置都必须按 toolset 分开。** 交叉编译时 gyp 会同时构建两套东西：
-+      # target（跑在 iPhone 上的库）和 host（跑在这台 Mac 上的代码生成工具，
-+      # 如 node_js2c、mksnapshot、torque）。把 iOS 的 SDK 与部署目标施加到
-+      # host 上，产出的工具就是 iOS 二进制，macOS 会直接 SIGKILL 它：
-+      #     /bin/sh: line 1: 15988 Killed: 9   .../node_js2c ...
-+      #     make[1]: *** [.../node_javascript.cc] Error 137
-+      # 报错里只有 "Killed: 9"，不提平台——用 `vtool -show-build` 看那个工具，
-+      # 会发现 platform IOS。
++      # ── 什么放 conditions、什么放 target_conditions ──────────────────
++      #
++      # 这个划分不是风格问题，是**求值顺序**问题，踩了两次才总结出来：
++      #
++      #   conditions        —— 早于各 target 自身的设置合并。
++      #                        放"target 有权覆盖"的编译器行为。
++      #   target_conditions —— 晚于各 target 自身的设置合并，会盖掉它们。
++      #                        只放"平台选择"这种谁都不该覆盖的东西。
++      #
++      # 两次事故：
++      #   ① C++ 标准放进 target_conditions → 盖掉了 common_node.gypi 给
++      #      Node 核心设的 gnu++20，ncrypto 的 operator<=> 编不过。
++      #   ② 异常开关放进 target_conditions → 盖掉了 v8.gyp 里 torque_base
++      #      自己设的 GCC_ENABLE_CPP_EXCEPTIONS: YES，报
++      #      "cannot use 'try' with exceptions disabled"。
 +      ['OS=="ios"', {
-+        'target_conditions': [
-+          ['_toolset=="target"', {
-+            'defines': ['_DARWIN_USE_64_BIT_INODE=1'],
++        'defines': ['_DARWIN_USE_64_BIT_INODE=1'],
++        # ── 编译器行为：target 可以覆盖（torque 就要覆盖异常开关）──
++        'xcode_settings': {
++          'ALWAYS_SEARCH_USER_PATHS': 'NO',
++          'GCC_CW_ASM_SYNTAX': 'NO',                # No -fasm-blocks
++          'GCC_DYNAMIC_NO_PIC': 'NO',               # No -mdynamic-no-pic
++          'GCC_ENABLE_CPP_EXCEPTIONS': 'NO',        # -fno-exceptions
++          'GCC_ENABLE_CPP_RTTI': 'NO',              # -fno-rtti
++          'GCC_ENABLE_PASCAL_STRINGS': 'NO',        # No -mpascal-strings
++          'GCC_STRICT_ALIASING': 'NO',              # -fno-strict-aliasing
++          'PREBINDING': 'NO',                       # No -Wl,-prebind
++          'USE_HEADERMAP': 'NO',
++          # 关掉调试符号：单架构 Node+V8 带符号实测 20 GB，这台机器放不下。
++          'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
++          'WARNING_CFLAGS': [
++            '-Wall',
++            '-Wendif-labels',
++            '-W',
++            '-Wno-unused-parameter',
++          ],
++        },
++        'conditions': [
++          ['clang==1', {
 +            'xcode_settings': {
-+              'ALWAYS_SEARCH_USER_PATHS': 'NO',
-+              'GCC_CW_ASM_SYNTAX': 'NO',                # No -fasm-blocks
-+              'GCC_DYNAMIC_NO_PIC': 'NO',               # No -mdynamic-no-pic
-+              'GCC_ENABLE_CPP_EXCEPTIONS': 'NO',        # -fno-exceptions
-+              'GCC_ENABLE_CPP_RTTI': 'NO',              # -fno-rtti
-+              'GCC_ENABLE_PASCAL_STRINGS': 'NO',        # No -mpascal-strings
-+              'GCC_STRICT_ALIASING': 'NO',              # -fno-strict-aliasing
-+              'PREBINDING': 'NO',                       # No -Wl,-prebind
++              'GCC_VERSION': 'com.apple.compilers.llvm.clang.1_0',
++              'CLANG_CXX_LANGUAGE_STANDARD': 'gnu++17',  # -std=gnu++17
++              'CLANG_CXX_LIBRARY': 'libc++',
++            },
++          }],
++        ],
++        # ── 平台选择：谁都不该覆盖 ────────────────────────────────
++        'target_conditions': [
++          # target = 跑在 iPhone 上的库
++          ['_toolset=="target"', {
++            'xcode_settings': {
 +              'IPHONEOS_DEPLOYMENT_TARGET': '17.0',
-+              'USE_HEADERMAP': 'NO',
-+              # 关掉调试符号：单架构 Node+V8 带符号实测 20 GB，这台机器放不下。
-+              'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
 +              'ARCHS': ['arm64'],
-+              'WARNING_CFLAGS': [
-+                '-Wall',
-+                '-Wendif-labels',
-+                '-W',
-+                '-Wno-unused-parameter',
-+              ],
 +            },
 +            'conditions': [
 +              ['iossim=="true"', {
@@ -89,16 +110,21 @@ index 7780ae10..e91fc892 100644
 +              }],
 +            ],
 +          }],
-+          # host 工具跑在这台 Mac 上，必须按 macOS 编。
-+          # IPHONEOS_DEPLOYMENT_TARGET 置空是有意的：xcode_emulation 里
-+          # `_AppendPlatformVersionMinFlags` 判的是"存在且非空"，置空才会落到
++          # host = 跑在这台 Mac 上的代码生成工具（node_js2c / mksnapshot /
++          # torque）。把 iOS 的 SDK 施加到它们身上，产出就是 iOS 二进制，
++          # macOS 会直接 SIGKILL：
++          #     /bin/sh: line 1: 15988 Killed: 9   .../node_js2c ...
++          #     make[1]: *** [.../node_javascript.cc] Error 137
++          # 报错只有 "Killed: 9"，不提平台——用 `vtool -show-build` 才看得出。
++          #
++          # IPHONEOS_DEPLOYMENT_TARGET 置空是有意的：xcode_emulation 的
++          # _AppendPlatformVersionMinFlags 判的是"存在且非空"，置空才会落到
 +          # macOS 分支去发 -mmacosx-version-min。
 +          ['_toolset=="host"', {
 +            'xcode_settings': {
 +              'SDKROOT': 'macosx',
 +              'IPHONEOS_DEPLOYMENT_TARGET': '',
 +              'MACOSX_DEPLOYMENT_TARGET': '11.0',
-+              'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
 +            },
 +          }],
 +          ['_type!="static_library"', {
@@ -106,18 +132,6 @@ index 7780ae10..e91fc892 100644
 +              'OTHER_LDFLAGS': [
 +                '-Wl,-search_paths_first'
 +              ],
-+            },
-+          }],
-+        ],
-+        # C++ 标准必须放在这一层，**不能**放进上面的 target_conditions：
-+        # target_conditions 的求值晚于 common_node.gypi 给 Node 核心设的
-+        # gnu++20，放在那里会把它顶回 gnu++17，ncrypto 的 operator<=> 就又编不过。
-+        'conditions': [
-+          ['clang==1', {
-+            'xcode_settings': {
-+              'GCC_VERSION': 'com.apple.compilers.llvm.clang.1_0',
-+              'CLANG_CXX_LANGUAGE_STANDARD': 'gnu++17',  # -std=gnu++17
-+              'CLANG_CXX_LIBRARY': 'libc++',
 +            },
 +          }],
 +        ],

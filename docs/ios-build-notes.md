@@ -311,3 +311,33 @@ out/node_js2c.host.mk               → MacOSX26.4.sdk
 cwd 还在里面）。**没有纠正它**——这个 scratch clone 本来就不入库，而这样一来
 移植成果被固定成了两个 commit，`git diff HEAD~2 HEAD` 就是完整补丁，
 比维护一份手工导出的 diff 更可靠。
+
+### 3.11 失败 #7：torque 需要异常 —— 同一个求值顺序问题，第二次
+
+```
+torque-compiler.cc:150:3: error: cannot use 'try' with exceptions disabled
+```
+
+`v8.gyp` 里 `torque_base` **自己就设了** `GCC_ENABLE_CPP_EXCEPTIONS: 'YES'`
+（torque 是代码生成器，用异常处理解析错误）。但我的全局 `'NO'` 放在
+`target_conditions` 里，**求值晚于各 target 自身的设置**，把它盖掉了。
+
+跟 #6 是同一个机制，第二次踩。这次总结成规则写进了 `common.gypi` 的注释：
+
+| 放哪 | 求值时机 | 放什么 |
+|---|---|---|
+| `conditions` | **早于** target 自身设置 | target 有权覆盖的**编译器行为**（C++ 标准、异常、RTTI、警告） |
+| `target_conditions` | **晚于** target 自身设置，会盖掉它们 | 谁都不该覆盖的**平台选择**（SDKROOT、部署目标、ARCHS、按 `_toolset` 分流） |
+
+重排后四条不变量同时成立（改完必须重跑 configure 才能验证）：
+
+```
+torque_base.target.mk   两个 flag 都没有  ← 自身的 YES 抵消了全局 NO
+libnode.target.mk       -fno-exceptions   ← 全局设置仍生效
+ncrypto.target.mk       -std=gnu++20      ← common_node.gypi 的覆盖没被顶掉
+node_js2c.host.mk       MacOSX26.4.sdk    ← 主机工具编成 macOS 二进制
+libnode.target.mk       iPhoneOS26.4.sdk  ← 目标库编成 iOS 二进制
+```
+
+**这条规则大概是整份笔记里最值钱的一句**：gyp 的两层条件不是"作用域大小"的
+区别，是**求值先后**的区别，而错误信息永远不会提到这一点。

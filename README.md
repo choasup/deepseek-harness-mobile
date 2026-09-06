@@ -45,7 +45,21 @@ cat > ~/.dsh/profiles/mobile/package.json <<'JSON'
   }
 }
 JSON
-printf '[]\n' > ~/.dsh/profiles/mobile/cordis.patch.yml
+cat > ~/.dsh/profiles/mobile/cordis.patch.yml <<'YAML'
+# dsh-base + dsh-headless 都不提供 storage，而 @dsh-mobile/remote-registry
+# 注入 storageDomain。理由见下面的约束 ③。
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+YAML
 ```
 
 然后把四个包都装进 profile：
@@ -58,7 +72,7 @@ pnpm add file:<仓库路径>/packages/mobile-app \
          file:<仓库路径>/packages/tool-fs-search
 ```
 
-### 两个必须知道的安装约束
+### 三个必须知道的安装约束
 
 **① 四个包都要列为 profile 的直接依赖，不能只装 `mobile-app`。**
 
@@ -77,6 +91,19 @@ pnpm add file:<仓库路径>/packages/mobile-app \
 `/opt/homebrew/bin/dsh` 的 shebang 是 `#!/usr/bin/env node`，会用 PATH 上的 node。
 若默认是 Node 20，dsh 会因不满足 `engines` 而失败——报错跟插件无关，很容易误判。
 
+**③ storage 三层写在 profile 的补丁里，不在 bundle 里。**
+
+`remote-registry` 需要 `storageDomain` 才能存机器和密钥，没有它整个"注册机器"
+功能会**无声地**不可用（硬 inject 的 fiber 一直 pending，不报错）。而三个官方
+bundle 里只有 `dsh-web-app` 挂了 storage，`dsh-base`/`dsh-headless` 都没有。
+
+这三行曾经写在 `mobile-app` 的补丁里，但那是错的：`insert` 列表是**拼接**的，
+不是按 id 覆盖，所以 bundle 一旦和 `dsh-web-app` 叠到同一个 profile，就会抛
+`duplicate loader entry id: storage`，整棵树起不来。
+
+所以归属是 profile 级——**基于 `dsh-web-app` 的 profile 不要加这一段**，
+它自带 storage。
+
 ## 注册一台远程机器
 
 目前只支持从 Mac 端导出一段 `dsh-remote://` 到剪贴板再粘贴导入（Apple 生态下
@@ -85,6 +112,46 @@ pnpm add file:<仓库路径>/packages/mobile-app \
 配置保存后会立刻跑一次五阶段探针：`tcp → credential → handshake → os → gpu`，
 任一层失败即停止并指出**是哪一层**——手机上排错成本高，笼统的 "connection failed"
 没有价值。
+
+## 在 iPhone 上看到它
+
+`ios/` 下是一个 iOS 外壳：`WKWebView` 加载 dsh 的 Web 界面。
+
+```bash
+cd ios && xcodegen generate
+xcodebuild -project DshMobile.xcodeproj -scheme DshMobile \
+  -sdk iphonesimulator -configuration Debug -derivedDataPath build \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/DshMobile.app
+xcrun simctl launch booted com.dshmobile.shell
+```
+
+外壳连的是 **Mac 上跑着的 host**，所以要另开一个 profile：Web 界面来自
+`dsh-web-app`，替换掉上面安装步骤里的 `dsh-headless`。它自带 storage，
+所以这个 profile 的 `cordis.patch.yml` 就是空的 `[]`——**不要**加上面那段
+storage 补丁，加了会抛 `duplicate loader entry id: storage`。
+
+```bash
+mkdir -p ~/.dsh/profiles/mobile-web
+sed 's/dsh-headless/dsh-web-app/; s/dsh-profile-mobile/dsh-profile-mobile-web/' \
+  ~/.dsh/profiles/mobile/package.json > ~/.dsh/profiles/mobile-web/package.json
+printf '[]\n' > ~/.dsh/profiles/mobile-web/cordis.patch.yml
+cd ~/.dsh/profiles/mobile-web && pnpm install   # 依赖同上面的四个包
+
+dsh --profile mobile-web web    # 监听 127.0.0.1:7799
+```
+
+**这一版的 runtime 还在 Mac 上，不在设备里。** 模拟器与宿主共享网络栈，所以
+`127.0.0.1` 直达；真机不行，而 dsh 出于安全拒绝绑 `0.0.0.0`（原话："it would
+expose remote code execution to the network"），所以真机不是改个 IP 的事。
+
+最终形态是设备内跑一个 jitless 的 Node、host 监听 app 自己的 loopback 端口——
+计划在 [`docs/superpowers/plans/2026-09-04-node-ios-build.md`](docs/superpowers/plans/2026-09-04-node-ios-build.md)。
+外壳这一层对此是**可替换**的：无论 host 在 Mac 上还是在 app 内的 Node 线程里，
+WebView 面对的都是同一个 loopback HTTP + WebSocket 端点，加载同一份前端。
+换过去时改的是 `HarnessEndpoint.current`，不是别的。
+
+界面用的还是桌面版布局（按 slot 换成移动布局插件是后面的事），在手机屏上偏挤。
 
 ## 诚实的限制
 

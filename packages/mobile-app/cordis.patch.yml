@@ -135,79 +135,30 @@
 - id: sandbox
   disabled: true
 
-# ── B. 新增：storage 三层（remote-registry 的前提条件）───────────────
+# ── B. 新增：mobile 专属的三个插件行 ──────────────────────────────────
 #
-# 排查这个任务时发现的组合缺口：`dsh-base` 完全没有任何 storage 行（只有
-# `credentials`），它唯一叠加的另一层 `dsh-headless` 也没有——三个官方
-# bundle 里只有 `dsh-web-app` 挂了 storage 三件套。而 `remote-registry`
-# 的 cordis 接线（`plugin.ts`）对 `storageDomain` 声明的是硬 inject：没有
-# 这个服务，它的 fiber 会一直 pending，既不报错也不生效——"注册一台机器"
-# 这个功能会在没有任何提示的情况下彻底不可用。
-#
-# 行 id 特意跟 `dsh-web-app` 保持一致（`storage`/`storage-json`/
-# `storage-domain`），这样两个 bundle 叠加到同一个 profile 时（比如未来
-# mobile 也想要 Web 界面）按 id 覆盖、最后一层生效，不会出现同一个服务被
-# 挂载两次的冲突。
+# 三条的 `name` 都写成 **profile 相对路径**（`./node_modules/...`）而不是
+# 包名。这不是风格选择：`cordis-plugin-loader` 对裸标识符的 `import()`
+# **不使用 profile 的 baseUrl**，只有以 `.` 开头的路径才走 baseUrl。用包名
+# 写的行会报 ERR_MODULE_NOT_FOUND——Node 相对 loader 自己的位置（全局 dsh
+# 安装目录）去解析，那里当然没有 `@dsh-mobile/*`。这跟本仓库无关，是这台
+# 机器上所有第三方 bundle 的共同处境：同一份 loader 下，`headless` profile
+# 里的 `@tencentcloudadp/dsh-adp` 一样中招，而 `dsh plugin add` 只是"在
+# profile 目录里跑 pnpm"的转发器，产出的正是这个布局。
 - insert:
-    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-
-    - id: storage-json
-      name: '@deepseek-ai/dsh-storage-json'
-      config:
-        root: !!js dshHomePath('storages')
-
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: json
-
-    # ── C. 新增：把执行能力接到用户自己的远程机器上 ───────────────────
+    # 注意：**storage 三层不在这里**。
     #
-    # 上面 A 段关掉的每一样本地能力，这里都换成一个不 fork/exec 本地进程的
-    # 等价物：`shell-ssh` 实现 `@deepseek-ai/dsh-shell` 的 `ShellExecutor`
-    # 抽象类，把 `ctx.shell` 背后的实现从"本地 spawn"换成"SSH 到用户登记过
-    # 的一台远程机器"；`remote-registry` 是那台机器的登记表（增删查、凭据
-    # 存取、连接探针），`shell-ssh` 依赖它取机器信息与密钥。
+    # 它们曾经在这个 patch 里，因为 dsh-base + dsh-headless 不提供 storage，
+    # 而 remote-registry 注入 storageDomain。当时的注释写着"行 id 与
+    # dsh-web-app 保持一致，两个 bundle 叠加时按 id 覆盖" ——**那是错的**：
+    # insert 列表是拼接的，重复 id 会直接抛 `duplicate loader entry id: storage`，
+    # 把这个 bundle 和 dsh-web-app 叠在一起就起不来。
     #
-    # 两个包都用 `./plugin` 这个独立子路径导出，**不能**写成裸包名：Task 11
-    # 之后两个包的 `.`（`index.ts`）是纯 barrel，只导出类型和不带 cordis
-    # 运行时依赖的纯函数/类，真正的 cordis 接线（`name`/`inject`/`apply`）
-    # 只从各自的 `<pkg>/plugin` 子路径导出。写成裸包名会加载到一个没有
-    # `apply` 的模块，插件树装载会直接失败。
-    #
-    # 不对 `remotes`/`credentials`/`shell`/`systemPrompt` 声明 `isolate`：
-    # Task 7 已经读过 `cordis-plugin-loader` 的源码验证过——`access()` 只在
-    # `entry.options.isolate` 显式列出某个服务名时才会给它一个独立符号，
-    # `patch-context` 构造的 isolate map 通过 `Object.create()` 对父级原型
-    # 透明，`cordis:group` 的分组本身不会意外把任何服务隔离出这棵树。隔离是
-    # 严格 opt-in 的，这里放心用分组组织可读性即可。
-    # ┌─ 为什么这里写的是相对路径而不是包名 ────────────────────────┐
-    # │ cordis-plugin-loader 加载条目的逻辑：                          │
-    # │   if (loader.internal)       → internal.import(name, baseUrl)  │
-    # │   else if (name 以 "." 开头)  → import(new URL(name, baseUrl))  │
-    # │   else                       → import(name) ← 裸标识符不用 baseUrl │
-    # │                                                               │
-    # │ 而 loader.internal 只在进程带 --expose-internals 时才存在。      │
-    # │ 所以用包名写的条目，Node 会相对 **loader 自己的位置**            │
-    # │ （/opt/homebrew/lib/node_modules/…）解析，看不见装在 profile    │
-    # │ 里的包，报 ERR_MODULE_NOT_FOUND。                              │
-    # │                                                               │
-    # │ 这不是我们特有的问题：会话前就配好的 headless profile 装了       │
-    # │ @tencentcloudadp/dsh-adp，同样报找不到。而 dsh 自己的           │
-    # │ `dsh plugin add` 只是"在 profile 目录里跑 pnpm"的转发器，       │
-    # │ 产出的正是这个布局。                                            │
-    # │                                                               │
-    # │ 相对路径走 baseUrl，baseUrl 锚定在 profile 目录，所以能解析。    │
-    # │                                                               │
-    # │ 代价有两条，都写进了仓库 README 的安装步骤：                     │
-    # │  1. 绕开了包的 exports 映射（直接指到 lib/plugin.js）            │
-    # │  2. 要求 profile 的 package.json 把这几个包列为**直接依赖**——   │
-    # │     pnpm 只把直接依赖提到 node_modules 顶层                     │
-    # │                                                               │
-    # │ dsh 的 loader 若将来对裸标识符也用 baseUrl，改回包名即可，       │
-    # │ 那才是更正确的写法。                                            │
-    # └───────────────────────────────────────────────────────────────┘
+    # 正确的归属是 **profile 级**：`dsh-web-app` 自带 storage，`dsh-headless`
+    # 不带。"我这个组合缺什么"是 profile 自己的事，不是 bundle 该替它决定的。
+    # 所以基于 headless 的 profile 要在自己的 cordis.patch.yml 里补这三行
+    # （仓库 README 的安装步骤有现成的），基于 web-app 的则不需要。
+
     - id: remote-registry
       name: './node_modules/@dsh-mobile/remote-registry/lib/plugin.js'
 
@@ -261,6 +212,14 @@
         # 换成那台机器的真实 name（再重启 dsh，见上面的"已知的功能缺口"）。
         machine: default
 
+    # 纯 JS 的 glob / grep，顶替上面禁掉的 tool-fs-search。
+    # 它注入 fs 而不是 subprocess——iOS 上起不了进程，但读文件可以。
+    # 工具名、参数 schema、输出 schema、系统提示词的 order 全部与 dsh 的实现
+    # 对齐（有 parity 测试守住），所以对模型而言这次替换是透明的。
+    - id: tool-fs-search-js
+      name: './node_modules/@dsh-mobile/tool-fs-search/lib/plugin.js'
+
+
 # ── D. MCP：不新增行，只留一条约束说明 ────────────────────────────────
 #
 # `@deepseek-ai/dsh-mcp-client` 不是"一个全局服务 + 一个传输方式配置项"的
@@ -294,10 +253,3 @@
 # dsh does not install these optional providers"）——`codex`/`claude-code`
 # provider 本身就是各自 fork 一个外部 CLI 子进程，同样撞在 iOS 的
 # process-exec 限制上，不需要本文件额外处理。
-    # 纯 JS 的 glob / grep，顶替上面禁掉的 tool-fs-search。
-    # 它注入 fs 而不是 subprocess——iOS 上起不了进程，但读文件可以。
-    # 工具名、参数 schema、输出 schema、系统提示词的 order 全部与 dsh 的实现
-    # 对齐（有 parity 测试守住），所以对模型而言这次替换是透明的。
-    - id: tool-fs-search-js
-      name: './node_modules/@dsh-mobile/tool-fs-search/lib/plugin.js'
-

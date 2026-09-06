@@ -116,25 +116,28 @@ describe('A. 禁用所有依赖本地进程的行', () => {
   })
 })
 
-describe('B. storage 三层已插入，且行 id 与 dsh-web-app 保持一致', () => {
-  const inserted = insertedRows()
-  const byId = (id: string) => inserted.find((row) => row.id === id)
+/**
+ * storage 三层曾经写在这个 bundle 的补丁里，行 id 跟 `dsh-web-app` 一致，
+ * 附带的注释写着"两个 bundle 叠加时按 id 覆盖、最后一层生效"。
+ * **那是错的**：按 id 覆盖只适用于修改前面层已有的行；`insert` 列表是
+ * **拼接**的，重复 id 直接抛 `duplicate loader entry id: storage`。
+ * 于是这个 bundle 跟 `dsh-web-app` 叠在一起就完全起不来——正是想做移动端
+ * Web 界面时撞上的。
+ *
+ * 归属修正为 **profile 级**：`dsh-web-app` 自带 storage，`dsh-headless`
+ * 不带；"我这个组合缺什么"是 profile 自己的事。基于 headless 的 profile
+ * 在自己的 cordis.patch.yml 里补这三行（README 安装步骤里有），
+ * 基于 web-app 的不用补。
+ */
+describe('B. storage 三层不由本 bundle 插入', () => {
+  const insertedIds = insertedRows().map((row) => row.id)
 
-  it('storage / storage-json / storage-domain 都被插入', () => {
-    expect(byId('storage')?.name).toBe('@deepseek-ai/dsh-storage')
-    expect(byId('storage-json')?.name).toBe('@deepseek-ai/dsh-storage-json')
-    expect(byId('storage-domain')?.name).toBe('@deepseek-ai/dsh-storage-domain')
-  })
-
-  it('storage-json 的 root 用 !!js dshHomePath(...) 表达式，不是写死的字符串', () => {
-    const config = byId('storage-json')?.config as { root?: { __jsExpr?: string } } | undefined
-    expect(config?.root?.__jsExpr).toContain('dshHomePath')
-  })
-
-  it('storage-domain 的 backend 是 json', () => {
-    const config = byId('storage-domain')?.config as { backend?: string } | undefined
-    expect(config?.backend).toBe('json')
-  })
+  it.each(['storage', 'storage-json', 'storage-domain'])(
+    '%s 不在本 bundle 的 insert 列表里',
+    (id) => {
+      expect(insertedIds).not.toContain(id)
+    },
+  )
 })
 
 describe('C. 挂上 remote-registry 与 shell-ssh，且用 profile 相对路径（裸包名 loader 解析不到）', () => {

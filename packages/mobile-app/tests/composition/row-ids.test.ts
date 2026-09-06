@@ -68,3 +68,33 @@ describe.skipIf(!ready)('禁用的行 id 必须真实存在于 dsh 的组合中'
     }
   })
 })
+
+/**
+ * 上面一组防的是"禁用了一个不存在的 id"（静默无效）。
+ * 这一组防的是反向的错误："插入了一个 dsh 已经插过的 id"——
+ * `insert` 列表是拼接的，重复 id 会抛 `duplicate loader entry id: X`，
+ * 让整棵插件树起不来。storage 三层就是这么栽的：它们本来写在这个 bundle 里，
+ * 单独用 dsh-headless 时没事，一跟 dsh-web-app 叠起来就崩。
+ */
+describe.skipIf(!ready)('插入的行 id 不能与 dsh 自己的行冲突', () => {
+  /** 本补丁 insert 块里新增的所有行 id。 */
+  function insertedIds(): string[] {
+    const block = patchText.slice(patchText.indexOf('- insert:'))
+    return [...block.matchAll(/^\s{4}-\s*id:\s*(\S+)/gm)].map((m) => m[1]!)
+  }
+
+  it('没有一个新增 id 已经存在于 dsh 的 bundle 里', () => {
+    const clashes = insertedIds().filter((id) => available.has(id))
+    expect(
+      clashes,
+      `这些 id 在 dsh 的 bundle 里已经有了：${clashes.join(', ')}\n` +
+        `insert 是拼接不是覆盖，重复会抛 duplicate loader entry id，整棵树起不来。\n` +
+        `如果这一层确实是本组合缺的（如 dsh-headless 没有 storage），它属于 profile 级补丁，不属于 bundle。`,
+    ).toEqual([])
+  })
+
+  it('反向对照：storage 确实是 dsh 自己插过的 id', () => {
+    // 证明上面那条不是恒真——storage 正是当初造成 duplicate 的那个 id。
+    expect(available.has('storage')).toBe(true)
+  })
+})

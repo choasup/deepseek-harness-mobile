@@ -1,0 +1,412 @@
+diff --git a/common.gypi b/common.gypi
+index 7780ae10..6747338e 100644
+--- a/common.gypi
++++ b/common.gypi
+@@ -108,7 +108,7 @@
+         'obj_dir%': '<(PRODUCT_DIR)/obj.target',
+         'v8_base': '<(PRODUCT_DIR)/obj.target/tools/v8_gypfiles/libv8_snapshot.a',
+       }],
+-      ['OS=="mac"', {
++      ['OS=="mac" or OS=="ios"', {
+         'obj_dir%': '<(PRODUCT_DIR)/obj.target',
+         'v8_base': '<(PRODUCT_DIR)/libv8_snapshot.a',
+       }],
+@@ -227,7 +227,7 @@
+             # increase performance, number from experimentation
+             'cflags': [ '-qINLINE=::150:100000' ]
+           }],
+-          ['OS!="mac" and OS!="win" and OS!="zos"', {
++          ['OS!="mac" and OS!="ios" and OS!="win" and OS!="zos"', {
+             # -fno-omit-frame-pointer is necessary for the --perf_basic_prof
+             # flag to work correctly. perf(1) gets confused about JS stack
+             # frames otherwise, even with --call-graph dwarf.
+@@ -387,7 +387,7 @@
+       [ 'target_arch=="arm64"', {
+         'msvs_configuration_platform': 'arm64',
+       }],
+-      ['asan == 1 and OS != "mac" and OS != "zos"', {
++      ['asan == 1 and OS != "mac" and OS != "ios" and OS != "zos"', {
+         'cflags+': [
+           '-fno-omit-frame-pointer',
+           '-fsanitize=address',
+@@ -397,7 +397,7 @@
+         'cflags!': [ '-fomit-frame-pointer' ],
+         'ldflags': [ '-fsanitize=address' ],
+       }],
+-      ['asan == 1 and OS == "mac"', {
++      ['asan == 1 and (OS == "mac" or OS == "ios")', {
+         'xcode_settings': {
+           'OTHER_CFLAGS+': [
+             '-fno-omit-frame-pointer',
+@@ -690,6 +690,69 @@
+           }],
+         ],
+       }],
++      # dsh-mobile: iOS 目标。以 22.19 自己的 mac 块为模板，按 iOS 调整。
++      # 与 nodejs-mobile（Node 18 时代）的版本相比刻意去掉了三处：
++      #   -fembed-bitcode / ENABLE_BITCODE —— bitcode 自 Xcode 14 起废弃并移除
++      #   -Wl,-no_pie                      —— 现代 iOS 强制 PIE
++      #   IPHONEOS_DEPLOYMENT_TARGET 13.0  —— 抬到 17.0，与外壳 app 对齐
++      ['OS=="ios"', {
++        'defines': ['_DARWIN_USE_64_BIT_INODE=1'],
++        'xcode_settings': {
++          'ALWAYS_SEARCH_USER_PATHS': 'NO',
++          'GCC_CW_ASM_SYNTAX': 'NO',                # No -fasm-blocks
++          'GCC_DYNAMIC_NO_PIC': 'NO',               # No -mdynamic-no-pic
++                                                    # (Equivalent to -fPIC)
++          'GCC_ENABLE_CPP_EXCEPTIONS': 'NO',        # -fno-exceptions
++          'GCC_ENABLE_CPP_RTTI': 'NO',              # -fno-rtti
++          'GCC_ENABLE_PASCAL_STRINGS': 'NO',        # No -mpascal-strings
++          'GCC_STRICT_ALIASING': 'NO',              # -fno-strict-aliasing
++          'PREBINDING': 'NO',                       # No -Wl,-prebind
++          'IPHONEOS_DEPLOYMENT_TARGET': '17.0',
++          'USE_HEADERMAP': 'NO',
++          # dsh-mobile: 关掉调试符号。实测 Node 18 那轮单架构 out/ 涨到 20 GB，
++          # 而这台机器只有十几 GB 可用；V8 的 debug info 是其中大头。
++          # 我们要的是能在设备上跑的静态库，不是能在 lldb 里单步的静态库——
++          # 真要调试再单独开一轮。
++          'GCC_GENERATE_DEBUGGING_SYMBOLS': 'NO',
++          'WARNING_CFLAGS': [
++            '-Wall',
++            '-Wendif-labels',
++            '-W',
++            '-Wno-unused-parameter',
++          ],
++        },
++        'target_conditions': [
++          ['_type!="static_library"', {
++            'xcode_settings': {
++              'OTHER_LDFLAGS': [
++                '-Wl,-search_paths_first'
++              ],
++            },
++          }],
++        ],
++        'conditions': [
++          ['target_arch=="arm64"', {
++            'xcode_settings': {'ARCHS': ['arm64']},
++          }],
++          ['target_arch=="x64"', {
++            'xcode_settings': {'ARCHS': ['x86_64']},
++          }],
++          ['clang==1', {
++            'xcode_settings': {
++              'GCC_VERSION': 'com.apple.compilers.llvm.clang.1_0',
++              'CLANG_CXX_LANGUAGE_STANDARD': 'gnu++17',  # -std=gnu++17
++              'CLANG_CXX_LIBRARY': 'libc++',
++            },
++          }],
++          # 模拟器与真机是不同的 SDK。iossim 由 configure.py 从
++          # --ios-simulator 传下来。
++          ['iossim=="true"', {
++            'xcode_settings': {'SDKROOT': 'iphonesimulator'},
++          }, {
++            'xcode_settings': {'SDKROOT': 'iphoneos'},
++          }],
++        ],
++      }],
+       ['OS=="freebsd"', {
+         'ldflags': [
+           '-Wl,--export-dynamic',
+diff --git a/configure.py b/configure.py
+index 24159408..3fc14c3a 100755
+--- a/configure.py
++++ b/configure.py
+@@ -1021,6 +1021,11 @@ parser.add_argument('-C',
+     default=None,
+     help=argparse.SUPPRESS)
+ 
++parser.add_argument('--ios-simulator',
++    action='store_true',
++    dest='ios_simulator',
++    help=argparse.SUPPRESS)
++
+ parser.add_argument('--clang-cl',
+     action='store',
+     dest='clang_cl',
+@@ -1443,6 +1448,9 @@ def configure_node_cctest_sources(o):
+     SearchFiles('test/cctest', 'h')
+ 
+ def configure_node(o):
++  if options.dest_os == 'ios':
++    o['variables']['OS'] = 'ios'
++    o['variables']['iossim'] = b(options.ios_simulator)
+   if options.dest_os == 'android':
+     o['variables']['OS'] = 'android'
+   o['variables']['node_prefix'] = options.prefix
+diff --git a/node.gyp b/node.gyp
+index d604e0dd..6e343b76 100644
+--- a/node.gyp
++++ b/node.gyp
+@@ -733,9 +733,14 @@
+               ],
+             }],
+           ],
+-          }, {
+-          'sources': [
+-            'src/node_snapshot_stub.cc'
++        }, {
++          # dsh-mobile: iOS 静态库走下面那条专门的分支，这里不重复加
++          'conditions': [
++            [ 'not (node_target_type=="static_library" and OS=="ios")', {
++              'sources': [
++                'src/node_snapshot_stub.cc'
++              ],
++            }],
+           ],
+         }],
+         [ 'OS in "linux freebsd openharmony" and '
+@@ -904,6 +909,13 @@
+             'src/node_snapshot_stub.cc',
+           ]
+         }],
++        # dsh-mobile: 交叉编译到 iOS 时 mksnapshot 跑不了（它是目标架构的
++        # 二进制），静态库形态下用 stub 顶替。
++        [ 'node_target_type=="static_library" and OS=="ios"', {
++          'sources': [
++            'src/node_snapshot_stub.cc',
++          ]
++        }],
+         [ 'node_use_sqlite=="true"', {
+           'sources': [
+             '<@(node_sqlite_sources)',
+diff --git a/node.gypi b/node.gypi
+index 5e0ccc94..f2d2ce6c 100644
+--- a/node.gypi
++++ b/node.gypi
+@@ -383,11 +383,16 @@
+           'defines': [ 'OPENSSL_API_COMPAT=0x10100000L', ],
+           'dependencies': [
+             './deps/openssl/openssl.gyp:openssl',
+-
+-            # For tests
+-            './deps/openssl/openssl.gyp:openssl-cli',
+           ],
+           'conditions': [
++            # dsh-mobile: openssl-cli 是给测试用的命令行工具，iOS 上编不出来
++            # （也用不上）。它是 nodejs-mobile 那份补丁里唯一一处必须移植的
++            # node.gypi 改动——另一处 coverage 条件对我们无关。
++            [ 'OS not in "ios android"', {
++              'dependencies': [
++                './deps/openssl/openssl.gyp:openssl-cli',
++              ],
++            }],
+             # -force_load or --whole-archive are not applicable for
+             # the static library
+             [ 'force_load=="true"', {
+diff --git a/tools/gyp/pylib/gyp/generator/make.py b/tools/gyp/pylib/gyp/generator/make.py
+index 7118492e..1c4e0cc6 100644
+--- a/tools/gyp/pylib/gyp/generator/make.py
++++ b/tools/gyp/pylib/gyp/generator/make.py
+@@ -66,8 +66,8 @@ generator_filelist_paths = None
+ def CalculateVariables(default_variables, params):
+     """Calculate additional variables for use in the build (called by gyp)."""
+     flavor = gyp.common.GetFlavor(params)
+-    if flavor == "mac":
+-        default_variables.setdefault("OS", "mac")
++    if flavor in ("mac", "ios"):
++        default_variables.setdefault("OS", flavor)
+         default_variables.setdefault("SHARED_LIB_SUFFIX", ".dylib")
+         default_variables.setdefault(
+             "SHARED_LIB_DIR", generator_default_variables["PRODUCT_DIR"]
+@@ -852,7 +852,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+         self.toolset = spec["toolset"]
+ 
+         self.is_mac_bundle = gyp.xcode_emulation.IsMacBundle(self.flavor, spec)
+-        if self.flavor == "mac":
++        if self.flavor in ("mac", "ios"):
+             self.xcode_settings = gyp.xcode_emulation.XcodeSettings(spec)
+         else:
+             self.xcode_settings = None
+@@ -1047,7 +1047,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+ 
+             # Write the actual command.
+             action_commands = action["action"]
+-            if self.flavor == "mac":
++            if self.flavor in ("mac", "ios"):
+                 action_commands = [
+                     gyp.xcode_emulation.ExpandEnvVars(command, env)
+                     for command in action_commands
+@@ -1231,7 +1231,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+                 # action, cd_action, and mkdirs get written to a toplevel variable
+                 # called cmd_foo. Toplevel variables can't handle things that change
+                 # per makefile like $(TARGET), so hardcode the target.
+-                if self.flavor == "mac":
++                if self.flavor in ("mac", "ios"):
+                     action = [
+                         gyp.xcode_emulation.ExpandEnvVars(command, env)
+                         for command in action
+@@ -1404,7 +1404,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+                 quoter=EscapeCppDefine,
+             )
+ 
+-            if self.flavor == "mac":
++            if self.flavor in ("mac", "ios"):
+                 cflags = self.xcode_settings.GetCflags(
+                     configname, arch=config.get("xcode_configuration_platform")
+                 )
+@@ -1423,7 +1423,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+             self.WriteList(cflags_c, "CFLAGS_C_%s" % configname)
+             self.WriteLn("# Flags passed to only C++ files.")
+             self.WriteList(cflags_cc, "CFLAGS_CC_%s" % configname)
+-            if self.flavor == "mac":
++            if self.flavor in ("mac", "ios"):
+                 self.WriteLn("# Flags passed to only ObjC files.")
+                 self.WriteList(cflags_objc, "CFLAGS_OBJC_%s" % configname)
+                 self.WriteLn("# Flags passed to only ObjC++ files.")
+@@ -1493,7 +1493,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+                 "%s " % precompiled_header.GetInclude("cc") + "$(CFLAGS_$(BUILDTYPE)) "
+                 "$(CFLAGS_CC_$(BUILDTYPE))"
+             )
+-            if self.flavor == "mac":
++            if self.flavor in ("mac", "ios"):
+                 self.WriteLn(
+                     "$(OBJS): GYP_OBJCFLAGS := "
+                     "$(DEFS_$(BUILDTYPE)) "
+@@ -1560,7 +1560,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+         """
+         assert not self.is_mac_bundle
+ 
+-        if self.flavor == "mac" and self.type in (
++        if self.flavor in ("mac", "ios") and self.type in (
+             "static_library",
+             "executable",
+             "shared_library",
+@@ -1607,7 +1607,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+     def _InstallImmediately(self):
+         return (
+             self.toolset == "target"
+-            and self.flavor == "mac"
++            and self.flavor in ("mac", "ios")
+             and self.type
+             in ("static_library", "executable", "shared_library", "loadable_module")
+         )
+@@ -1705,7 +1705,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+         if self.type != "none":
+             for configname in sorted(configs.keys()):
+                 config = configs[configname]
+-                if self.flavor == "mac":
++                if self.flavor in ("mac", "ios"):
+                     ldflags = self.xcode_settings.GetLdflags(
+                         configname,
+                         generator_default_variables["PRODUCT_DIR"],
+@@ -1740,7 +1740,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+                     library_dirs = [Sourceify(self.Absolutify(i)) for i in library_dirs]
+                 ldflags += [("-L%s" % library_dir) for library_dir in library_dirs]
+                 self.WriteList(ldflags, "LDFLAGS_%s" % configname)
+-                if self.flavor == "mac":
++                if self.flavor in ("mac", "ios"):
+                     self.WriteList(
+                         self.xcode_settings.GetLibtoolflags(configname),
+                         "LIBTOOLFLAGS_%s" % configname,
+@@ -1749,7 +1749,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+             if libraries:
+                 # Remove duplicate entries
+                 libraries = gyp.common.uniquer(libraries)
+-                if self.flavor == "mac":
++                if self.flavor in ("mac", "ios"):
+                     libraries = self.xcode_settings.AdjustLibraries(libraries)
+             self.WriteList(libraries, "LIBS")
+             self.WriteLn(
+@@ -1758,7 +1758,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+             )
+             self.WriteLn("%s: LIBS := $(LIBS)" % QuoteSpaces(self.output_binary))
+ 
+-            if self.flavor == "mac":
++            if self.flavor in ("mac", "ios"):
+                 self.WriteLn(
+                     "%s: GYP_LIBTOOLFLAGS := $(LIBTOOLFLAGS_$(BUILDTYPE))"
+                     % QuoteSpaces(self.output_binary)
+@@ -1767,7 +1767,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+         # Postbuild actions. Like actions, but implicitly depend on the target's
+         # output.
+         postbuilds = []
+-        if self.flavor == "mac":
++        if self.flavor in ("mac", "ios"):
+             if target_postbuilds:
+                 postbuilds.append("$(TARGET_POSTBUILDS_$(BUILDTYPE))")
+             postbuilds.extend(gyp.xcode_emulation.GetSpecPostbuildCommands(spec))
+@@ -1877,7 +1877,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+                     "Spaces in alink input filenames not supported (%s)" % link_dep
+                 )
+             if (
+-                self.flavor not in ("mac", "openbsd", "netbsd", "win")
++                self.flavor not in ("mac", "ios", "openbsd", "netbsd", "win")
+                 and not self.is_standalone_static_library
+             ):
+                 if self.flavor in ("linux", "android"):
+@@ -1995,7 +1995,7 @@ $(obj).$(TOOLSET)/$(TARGET)/%%.o: $(obj)/%%%s FORCE_DO_CMD
+             if self.flavor != "zos":
+                 installable_deps.append(self.output)
+             if (
+-                self.flavor == "mac"
++                self.flavor in ("mac", "ios")
+                 and "product_dir" not in spec
+                 and self.toolset == "target"
+             ):
+@@ -2495,7 +2495,7 @@ def GenerateOutput(target_list, target_dicts, data, params):
+         "LINK.host": LINK_host,
+         "PLI.host": PLI_host,
+     }
+-    if flavor == "mac":
++    if flavor in ("mac", "ios"):
+         flock_command = "%s gyp-mac-tool flock" % sys.executable
+         header_params.update(
+             {
+@@ -2673,7 +2673,7 @@ def GenerateOutput(target_list, target_dicts, data, params):
+         spec = target_dicts[qualified_target]
+         configs = spec["configurations"]
+ 
+-        if flavor == "mac":
++        if flavor in ("mac", "ios"):
+             gyp.xcode_emulation.MergeGlobalXcodeSettingsToSpec(data[build_file], spec)
+ 
+         writer = MakefileWriter(generator_flags, flavor)
+diff --git a/tools/gyp/pylib/gyp/xcode_emulation.py b/tools/gyp/pylib/gyp/xcode_emulation.py
+index 0746865d..8e9afd99 100644
+--- a/tools/gyp/pylib/gyp/xcode_emulation.py
++++ b/tools/gyp/pylib/gyp/xcode_emulation.py
+@@ -553,8 +553,12 @@ class XcodeSettings:
+         return XcodeSettings._sdk_path_cache[sdk_root]
+ 
+     def _AppendPlatformVersionMinFlags(self, lst):
+-        self._Appendf(lst, "MACOSX_DEPLOYMENT_TARGET", "-mmacosx-version-min=%s")
+-        if "IPHONEOS_DEPLOYMENT_TARGET" in self._Settings():
++        # dsh-mobile: 原来是无条件先发 -mmacosx-version-min，再看要不要发 iOS 的。
++        # 交叉编译到 iOS 时那条 macOS flag 会跟 iPhoneOS SDK 打架，所以改成二选一。
++        if (
++            "IPHONEOS_DEPLOYMENT_TARGET" in self._Settings()
++            and self._Settings()["IPHONEOS_DEPLOYMENT_TARGET"]
++        ):
+             # TODO: Implement this better?
+             sdk_path_basename = os.path.basename(self._SdkPath())
+             if sdk_path_basename.lower().startswith("iphonesimulator"):
+@@ -565,6 +569,8 @@ class XcodeSettings:
+                 self._Appendf(
+                     lst, "IPHONEOS_DEPLOYMENT_TARGET", "-miphoneos-version-min=%s"
+                 )
++        else:
++            self._Appendf(lst, "MACOSX_DEPLOYMENT_TARGET", "-mmacosx-version-min=%s")
+ 
+     def GetCflags(self, configname, arch=None):
+         """Returns flags that need to be added to .c, .cc, .m, and .mm
+@@ -653,7 +659,8 @@ class XcodeSettings:
+         # If GYP_CROSSCOMPILE (--cross-compiling), disable architecture-specific
+         # additions and assume these will be provided as required via CC_host,
+         # CXX_host, CC_target and CXX_target.
+-        if not gyp.common.CrossCompileRequested():
++        # dsh-mobile: 交叉编译到 iOS 时仍需发 -arch/-isysroot，见 ios-build-notes
++        if True:  # was: if not gyp.common.CrossCompileRequested():
+             if arch is not None:
+                 archs = [arch]
+             else:
+@@ -934,7 +941,8 @@ class XcodeSettings:
+             ldflags.append("-Wl,-order_file")
+             ldflags.append("-Wl," + gyp_to_build_path(self._Settings()["ORDER_FILE"]))
+ 
+-        if not gyp.common.CrossCompileRequested():
++        # dsh-mobile: 交叉编译到 iOS 时仍需发 -arch/-isysroot，见 ios-build-notes
++        if True:  # was: if not gyp.common.CrossCompileRequested():
+             if arch is not None:
+                 archs = [arch]
+             else:

@@ -8,3 +8,4 @@ lib/
 # 复现方式记在 docs/ios-build-notes.md：按记录的 commit clone，再打 patches/。
 vendor/nodejs-mobile/
 vendor/make-shim/
+vendor/node-22/

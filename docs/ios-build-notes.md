@@ -111,9 +111,14 @@ note: expanded from macro 'fdopen'
 教训：对着 clone 出来的子仓库跑 git 命令前，先确认落在哪个仓库
 （`git rev-parse --show-toplevel`）。
 
-### 1.5 构建结果
+### 1.5 结论：拿到工具链信号后停止
 
-*（进行中）*
+编到 **25 个静态库**（含 `libnode.a`、`libopenssl.a`、`libuv.a`）时停掉了。
+检查点 1 要证明的事——"这套工具链能给 iOS arm64 编出 Node"——到这里已经成立，
+而按下一节的实测，Node 18 装上设备也跑不了 dsh，继续编只是烧磁盘。
+
+**`out/` 实测 20 GB**（不是构建早期 `du` 看到的 414 MB）。这是后面所有容量
+判断的依据：单架构 Node+V8 构建约 20 GB。删掉它才够接着做 22.19。
 
 ---
 
@@ -160,3 +165,85 @@ node v20.20.2  Cannot find package '@dsh-mobile/…' imported from
 
 不影响正常使用（Node 20 本来就不满足 dsh 的 engines），但**排查时会误导**：
 同一份补丁 `nvm use 20` 报"包找不到"、切到 24 就好，很容易归因到装包上。
+
+
+---
+
+## 检查点 3：移植到 Node 22.19
+
+### 3.1 补丁清单
+
+做法：给 `vendor/nodejs-mobile` 加 upstream remote，浅取 `v18.20.4` 的 tag，
+再 `git diff upstream-v18.20.4 HEAD`。229 个文件，但筛掉示例 app
+（`tools/mobile-test/`）、`node_modules`、测试和 CRLF 噪音
+（`.cmd` / `.msvc` / `.bat` / ChangeLog 那些整文件行尾改动）之后，
+**真正要移植的只有十几个**。提在 `patches/nodejs-mobile/` 下，按移植顺序分四类。
+
+### 3.2 移植到 22.19：412 行，6 个文件
+
+产物是 [`patches/node-22.19-ios.patch`](../patches/node-22.19-ios.patch)。
+比原始补丁小得多，三个原因：
+
+**① 上游自己收了一部分。** 22.19 的 `configure.py` 已经把 `ios` 列进合法
+`--dest-os`，`msign-return-address` 和 dtrace 排除那两处也已被上游重构掉。
+但 `common.gypi` 里 `ios` 出现 **0 次**，平台配置仍需自己加。
+
+**② 去掉了 Android 相关的部分**（原补丁是 Android + iOS 合在一起的）。
+
+**③ 三处不能照抄——它们是 2020 年的写法，在 Xcode 26 上是错的：**
+
+| 原补丁 | 为什么去掉 |
+|---|---|
+| `-fembed-bitcode` / `ENABLE_BITCODE: YES` | bitcode 自 Xcode 14 起废弃并移除 |
+| `-Wl,-no_pie` | 现代 iOS 强制 PIE |
+| `IPHONEOS_DEPLOYMENT_TARGET: 13.0` | 抬到 17.0，与外壳 app 对齐 |
+
+### 3.3 失败 #2：gyp 的 make 生成器只认 mac，不认 ios
+
+第一次 `make` 在 gtest 上炸：
+
+```
+gtest-port.h:260:2: error: C++ versions less than C++17 are not supported.
+gtest-printers.h:922:29: error: no member named 'any' in namespace 'std'
+```
+
+看着像 gtest 的问题，其实不是。查编译行发现**只有 `-std=gnu11`，一个 C++ 标准
+都没有**——而 `config.gypi` 里 `clang: 1` 明明设了，`common.gypi` 的 iOS 块里
+`CLANG_CXX_LANGUAGE_STANDARD: 'gnu++17'` 也写了。
+
+原因：`xcode_settings` 要靠 `gyp/generator/make.py` 调用
+`xcode_emulation.py` 翻译成命令行 flag，而那套翻译**只在 `flavor == "mac"`
+时启用**。`flavor` 是 `ios` 时整条路径被跳过，所有 `xcode_settings` 静默失效
+——不报错，只是 flag 不见了。
+
+这正是 nodejs-mobile 要改 `make.py`（17 处）和 `xcode_emulation.py`（3 处）的
+原因。我一开始按"gyp 平台配置"归类时把这两个文件当成次要的跳过了，是判断失误：
+**它们不是配置，是让配置生效的那一层。**
+
+`xcode_emulation.py` 的三处里，有一处特别反直觉：
+
+```python
+if not gyp.common.CrossCompileRequested():   # 上游
+if True:                                      # 改成
+```
+
+上游在交叉编译时**跳过**发 `-arch` / `-isysroot`，理由是"这些应由
+`CC_target` / `CXX_target` 提供"。但我们没有那样一套 wrapper 脚本，
+不发就没有 `-arch arm64`，编出来是主机架构的目标文件。
+
+### 3.4 移植后的验证（改了生成器必须重跑 configure）
+
+```
+-miphoneos-version-min=17.0   38 处
+-std=gnu++17                  22 处
+iPhoneOS26.4.sdk              44 处
+```
+
+`config.gypi`：`OS: 'ios'`、`iossim: 'false'`、`node_target_type:
+'static_library'`、`target_arch: 'arm64'`。
+
+### 3.5 磁盘：关掉调试符号
+
+Node 18 那轮 `out/` 实测 20 GB，而这台机器当时只剩 15 GB。在 iOS 块里加
+`GCC_GENERATE_DEBUGGING_SYMBOLS: 'NO'`，生成的 makefile 里 `-gdwarf` 归零。
+要的是能在设备上跑的静态库，不是能在 lldb 里单步的静态库。

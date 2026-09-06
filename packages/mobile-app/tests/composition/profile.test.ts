@@ -137,16 +137,16 @@ describe('B. storage 三层已插入，且行 id 与 dsh-web-app 保持一致', 
   })
 })
 
-describe('C. 挂上 remote-registry 与 shell-ssh，且用 /plugin 子路径', () => {
+describe('C. 挂上 remote-registry 与 shell-ssh，且用 profile 相对路径（裸包名 loader 解析不到）', () => {
   const inserted = insertedRows()
   const byId = (id: string) => inserted.find((row) => row.id === id)
 
-  it('remote-registry 用 @dsh-mobile/remote-registry/plugin', () => {
-    expect(byId('remote-registry')?.name).toBe('@dsh-mobile/remote-registry/plugin')
+  it('remote-registry 用 profile 相对路径', () => {
+    expect(byId('remote-registry')?.name).toBe('./node_modules/@dsh-mobile/remote-registry/lib/plugin.js')
   })
 
-  it('shell-ssh 用 @dsh-mobile/shell-ssh/plugin', () => {
-    expect(byId('shell-ssh')?.name).toBe('@dsh-mobile/shell-ssh/plugin')
+  it('shell-ssh 用 profile 相对路径', () => {
+    expect(byId('shell-ssh')?.name).toBe('./node_modules/@dsh-mobile/shell-ssh/lib/plugin.js')
   })
 
   it('两行的 name 都不是裸包名（不能没有 /plugin 后缀）', () => {

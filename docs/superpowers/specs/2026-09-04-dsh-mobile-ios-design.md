@@ -339,3 +339,37 @@ dsh client 侧同样是 cordis 插件树：`dsh-client-runtime`（SlotRegistry +
 
 - `worker_threads` 在 iOS 上的可用性需在里程碑 2 验证。若不可用，`code-runtime-worker-thread` 与 `workflow-worker-thread` 需降级为主线程执行（有阻塞 UI 的风险）
 - `node:sqlite` 在 iOS 构建中的可用性。base 配置为 `openAt: never`，若其 import 是惰性的则可暂时绕过
+
+
+---
+
+## 附：宿主环境上的两个坑（2026-09-06 查实）
+
+这两条都不是本项目的代码问题，但都会让 mobile profile 起不来，且报错都指向别处。
+
+**① `cordis-plugin-loader` 对裸标识符的 `import()` 不使用 `baseUrl`。**
+
+```js
+if (loader.internal)        → internal.import(name, baseUrl)   // 仅在 --expose-internals 下存在
+else if (name 以 "." 开头)   → import(new URL(name, baseUrl))
+else                        → import(name)                     // ← 裸标识符
+```
+
+后果：用包名写的插件条目，Node 相对 **loader 自己的位置**（全局 dsh 安装目录）
+解析，看不见装在 profile 里的包，报 `ERR_MODULE_NOT_FOUND`。
+
+**对照实验证明这不是我们特有的问题**：会话前就配好的 `headless` profile 装了
+`@tencentcloudadp/dsh-adp`，同样报 `Cannot find package`。而 `dsh plugin add`
+本身只是"在 profile 目录里跑 pnpm"的转发器，产出的正是这个布局——也就是说
+**文档推荐的安装路径产出一个起不来的 profile**。
+
+绕法：补丁里改用 profile 相对路径（`./node_modules/…/lib/plugin.js`），它走
+`baseUrl`。代价是绕开包的 `exports` 映射，并要求 profile 把这些包列为直接依赖
+（pnpm 只提升直接依赖）。dsh 若将来对裸标识符也用 `baseUrl`，应改回包名。
+
+**② `dsh` 的 shebang 是 `#!/usr/bin/env node`。**
+
+用 PATH 上的 node。这台机器默认是 Node 20.20.2，不满足 dsh 的
+`engines: ^22.19 || >=24`，于是失败——而报错跟插件毫无关系，极易误判成
+自己的代码有问题。前期我所有验证都显式用了 `/opt/homebrew/bin/node`
+（22.23.2），所以一直没撞到；直到最后用普通 `dsh` 验收才暴露。

@@ -189,8 +189,8 @@ const OUR_ADDITIONS: Array<{ id: string; name: string }> = [
   { id: 'storage', name: '@deepseek-ai/dsh-storage' },
   { id: 'storage-json', name: '@deepseek-ai/dsh-storage-json' },
   { id: 'storage-domain', name: '@deepseek-ai/dsh-storage-domain' },
-  { id: 'remote-registry', name: '@dsh-mobile/remote-registry/plugin' },
-  { id: 'shell-ssh', name: '@dsh-mobile/shell-ssh/plugin' },
+  { id: 'remote-registry', name: './node_modules/@dsh-mobile/remote-registry/lib/plugin.js' },
+  { id: 'shell-ssh', name: './node_modules/@dsh-mobile/shell-ssh/lib/plugin.js' },
 ]
 
 describe.skipIf(!READY)('real dsh composes the mobile profile (Task 13, Step 2)', () => {
@@ -233,7 +233,7 @@ describe.skipIf(!READY)('real dsh composes the mobile profile (Task 13, Step 2)'
     }
   })
 
-  it('inserts our three additions (storage x3, remote-registry, shell-ssh) enabled with the /plugin subpath', () => {
+  it('inserts our three additions (storage x3, remote-registry, shell-ssh) enabled with a profile-relative path (see the rationale block in the patch)', () => {
     const { stdout } = runDumpConfig()
     const entries = parseDump(stdout)
     for (const { id, name } of OUR_ADDITIONS) {

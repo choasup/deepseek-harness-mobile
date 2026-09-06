@@ -182,8 +182,34 @@
     # `patch-context` 构造的 isolate map 通过 `Object.create()` 对父级原型
     # 透明，`cordis:group` 的分组本身不会意外把任何服务隔离出这棵树。隔离是
     # 严格 opt-in 的，这里放心用分组组织可读性即可。
+    # ┌─ 为什么这里写的是相对路径而不是包名 ────────────────────────┐
+    # │ cordis-plugin-loader 加载条目的逻辑：                          │
+    # │   if (loader.internal)       → internal.import(name, baseUrl)  │
+    # │   else if (name 以 "." 开头)  → import(new URL(name, baseUrl))  │
+    # │   else                       → import(name) ← 裸标识符不用 baseUrl │
+    # │                                                               │
+    # │ 而 loader.internal 只在进程带 --expose-internals 时才存在。      │
+    # │ 所以用包名写的条目，Node 会相对 **loader 自己的位置**            │
+    # │ （/opt/homebrew/lib/node_modules/…）解析，看不见装在 profile    │
+    # │ 里的包，报 ERR_MODULE_NOT_FOUND。                              │
+    # │                                                               │
+    # │ 这不是我们特有的问题：会话前就配好的 headless profile 装了       │
+    # │ @tencentcloudadp/dsh-adp，同样报找不到。而 dsh 自己的           │
+    # │ `dsh plugin add` 只是"在 profile 目录里跑 pnpm"的转发器，       │
+    # │ 产出的正是这个布局。                                            │
+    # │                                                               │
+    # │ 相对路径走 baseUrl，baseUrl 锚定在 profile 目录，所以能解析。    │
+    # │                                                               │
+    # │ 代价有两条，都写进了仓库 README 的安装步骤：                     │
+    # │  1. 绕开了包的 exports 映射（直接指到 lib/plugin.js）            │
+    # │  2. 要求 profile 的 package.json 把这几个包列为**直接依赖**——   │
+    # │     pnpm 只把直接依赖提到 node_modules 顶层                     │
+    # │                                                               │
+    # │ dsh 的 loader 若将来对裸标识符也用 baseUrl，改回包名即可，       │
+    # │ 那才是更正确的写法。                                            │
+    # └───────────────────────────────────────────────────────────────┘
     - id: remote-registry
-      name: '@dsh-mobile/remote-registry/plugin'
+      name: './node_modules/@dsh-mobile/remote-registry/lib/plugin.js'
 
     # 未配置机器时会发生什么（改过一版，见下方"这版为什么变了"）
     # ────────────────────────────────────────────────────────────────
@@ -227,7 +253,7 @@
     # `remote-registry`（`domain/changed` 已经带够信息可以过滤），但需要
     # 一次独立的实现 + 测试，这里不顺手做。
     - id: shell-ssh
-      name: '@dsh-mobile/shell-ssh/plugin'
+      name: './node_modules/@dsh-mobile/shell-ssh/lib/plugin.js'
       config:
         # 全新安装时几乎肯定查不到这个名字——这是预期状态，不是配置错误：
         # 见上面大段注释，查不到时这一行只是安静地不提供 ctx.shell。用户
@@ -273,5 +299,5 @@
     # 工具名、参数 schema、输出 schema、系统提示词的 order 全部与 dsh 的实现
     # 对齐（有 parity 测试守住），所以对模型而言这次替换是透明的。
     - id: tool-fs-search-js
-      name: '@dsh-mobile/tool-fs-search/plugin'
+      name: './node_modules/@dsh-mobile/tool-fs-search/lib/plugin.js'
 

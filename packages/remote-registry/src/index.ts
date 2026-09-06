@@ -12,6 +12,7 @@
 // 所以这里不 re-export plugin.ts 的任何东西，哪怕只是类型：只要有一条
 // value 级别的桥接，任何仅仅想要一个类型守卫的消费者就会被迫连带加载
 // plugin.ts 的运行时依赖。见 Task 10 复审 I2。
+export { MACHINES_TABLE, REMOTE_DOMAIN_NAME } from './types.ts'
 export type { RemoteMachine, SshCredentials } from './types.ts'
 export {
   REMOTE_URL_SCHEME,

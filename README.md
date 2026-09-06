@@ -92,8 +92,9 @@ pnpm add file:<仓库路径>/packages/mobile-app \
   `tool-bash` 注入 `shell`；`assertEntriesActivated()` 把 PENDING 当 FAILED，
   留着启用会让整棵插件树起不来。这与 dsh 自己对可选 provider 的做法一致
   （`tool-subagent-codex` 也是出厂禁用）。注册机器后由设置界面打开它。
-- **注册机器需要重启才能激活 shell。** 插件在挂载时读一次注册表，内容变化不会
-  重新触发。存储域已经在每次写入时发出 `domain/changed`，补上订阅是几十行的事。
+- ~~注册机器需要重启才能激活 shell~~ **已解决**：插件在机器缺席时订阅
+  `domain/changed`，等那条记录被写入再挂载 `ctx.shell`。`tool-bash` 因为注入
+  `shell`，会由 cordis 在服务出现时自动激活——不需要我们协调。
 - **`kill()` 是尽力而为的通道拆除**，不是杀进程。非 PTY 的 exec channel 下
   OpenSSH 不可靠地回收远程命令——`make -j8` 会继续跑，而本地已报 `killed`。
   界面文案应说"连接已关闭"，不是"进程已终止"。

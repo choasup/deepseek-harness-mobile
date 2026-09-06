@@ -22,7 +22,7 @@ import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellProcess, ShellRunResult } from '@deepseek-ai/dsh-shell'
 import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import type { RemoteMachine } from '@dsh-mobile/remote-registry'
-import { probeMachine } from '@dsh-mobile/remote-registry'
+import { probeMachine, MACHINES_TABLE, REMOTE_DOMAIN_NAME } from '@dsh-mobile/remote-registry'
 import type { ProbeDeps, ProbeOptions, ProbeReport } from '@dsh-mobile/remote-registry'
 import { SshConnectionPool } from './connection.ts'
 import { execRemote } from './exec.ts'
@@ -405,18 +405,14 @@ const DEFAULT_KEEPALIVE_COUNT_MAX = 3
  * `cordis.patch.yml` 需要单独决定的事，取决于当时的组合里还有没有别的东西
  * 会一直注入 `shell`；这个包本身只保证"没配置机器时不崩、不误导模型"。
  */
-export async function apply(ctx: Context, config: Config): Promise<void> {
-  const machine = await ctx.remotes.get(config.machine)
-  if (!machine) {
-    ctx.logger.warn(
-      "shell-ssh: 机器 '%s' 还没有在 remote-registry 里注册，这次不会提供 ctx.shell"
-      + '——先用设置/命令行把这台机器录入 remote-registry，再重启 dsh（或者等一次配置'
-      + '热重载）让这个插件重新解析。在此之前，任何硬依赖 ctx.shell 的消费者都不会激活。',
-      config.machine,
-    )
-    return
-  }
-
+/**
+ * 真正把执行器挂上去：建连接池、注册 `ctx.shell`、贡献 system prompt。
+ *
+ * 抽成函数是因为它有**两个调用时机**：`apply()` 里机器已存在时立刻调用；
+ * 或者机器当时还没注册，等 `domain/changed` 报告它被写入后再调用（见 `apply()`）。
+ * 两条路径必须做完全相同的事，所以只能有一份实现。
+ */
+function mountExecutor(ctx: Context, config: Config, machine: RemoteMachine): void {
   const pool = new SshConnectionPool({
     credentials: (m) => ctx.remotes.credentialsFor(m),
     connectTimeoutMs: config.connectTimeoutMs,
@@ -502,4 +498,64 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       err instanceof Error ? err.message : String(err),
     )
   })
+}
+
+/**
+ * 插件入口。
+ *
+ * **未注册机器时不会失败，也不会注册 `ctx.shell`。** 这是 Task 12 定下的形态，
+ * 经两轮实测：`dsh-app-boot` 的 `assertEntriesActivated()` 把 PENDING 的 fiber
+ * 当 FAILED，所以"挂载但抛错"和"让 tool-bash 挂着等一个永不出现的 shell"
+ * 两种做法都会让**整棵插件树**起不来（连 `dsh --profile mobile --help` 都
+ * exit(1)）。不提供服务则相反：`tool-bash` 注入 `shell`，拿不到就安静地不激活，
+ * 模型也就不会看到一个必然失败的工具。
+ *
+ * 机器稍后才被注册时，不需要重启：本函数订阅 `domain/changed`，
+ * 等到那条记录被写入再挂载执行器。`tool-bash` 因为注入 `shell`，
+ * 会在 `ctx.shell` 出现时由 cordis 自动激活——不需要我们协调。
+ */
+export async function apply(ctx: Context, config: Config): Promise<void> {
+  const machine = await ctx.remotes.get(config.machine)
+  if (machine) {
+    mountExecutor(ctx, config, machine)
+    return
+  }
+
+  ctx.logger.warn(
+    "shell-ssh: 机器 '%s' 还没有在 remote-registry 里注册，暂时不提供 ctx.shell。"
+    + '注册之后会自动挂上，不需要重启。',
+    config.machine,
+  )
+
+  // 只挂一次：`domain/changed` 对同一条记录可能来多次（比如先 add 再
+  // setPrivateKey/pinFingerprint 都会写这张表），而 `mountExecutor` 会
+  // 注册服务与 effect，重复调用等于重复注册。
+  let mounted = false
+  ctx.effect(() =>
+    ctx.on('domain/changed', (change) => {
+      if (mounted) return
+      if (change.domain !== REMOTE_DOMAIN_NAME) return
+      if (change.table !== MACHINES_TABLE) return
+      if (change.key !== config.machine) return
+      if (change.operation !== 'put') return
+
+      mounted = true
+      // 事件回调是同步的，而取机器要 await；用 void + catch 而不是让一次
+      // 失败变成没人处理的 rejection。取回来的记录可能与事件里的 value
+      // 不同（归一化、或者紧接着又被改过），所以重新读一次注册表而不是
+      // 直接信任 change.value。
+      void (async () => {
+        const registered = await ctx.remotes.get(config.machine)
+        if (!registered) {
+          mounted = false // 竞态：刚写完又被删了，继续等
+          return
+        }
+        ctx.logger.info("shell-ssh: 机器 '%s' 已注册，正在挂载 ctx.shell", config.machine)
+        mountExecutor(ctx, config, registered)
+      })().catch((error: unknown) => {
+        mounted = false
+        ctx.logger.warn('shell-ssh: 机器注册后挂载失败：%s', String(error))
+      })
+    }),
+  )
 }

@@ -30,3 +30,18 @@ export interface SshCredentials {
   privateKey?: string | Buffer
   passphrase?: string
 }
+
+/**
+ * 存储域名。**下划线不是笔误**：`dsh-storage` 的 `UNIT_NAME_RE` 是
+ * `/^[a-z][a-z0-9_]*$/`，不允许连字符，而域名同时是 JSON 后端的文件名。
+ * 写成 `remote-registry` 会在模块加载时直接抛。注意这与 cordis 插件自己的
+ * `name`（连字符版）是两个不同的命名空间。
+ *
+ * 放在 types.ts 而不是 plugin.ts，是为了让 barrel 能安全导出它——
+ * `shell-ssh` 订阅 `domain/changed` 时要按域/表过滤，不该硬编码字符串
+ * （改名时会静默失配），但它也不该为了两个常量就被迫解析整个存储栈。
+ */
+export const REMOTE_DOMAIN_NAME = 'remote_registry'
+
+/** 机器记录所在的表名。同上，供 `domain/changed` 的订阅方过滤。 */
+export const MACHINES_TABLE = 'machines'

@@ -9,6 +9,7 @@ import z from 'zod'
 import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { RemoteRegistry, type RegistryStore } from './registry.ts'
+import { MACHINES_TABLE, REMOTE_DOMAIN_NAME } from './types.ts'
 import type { RemoteMachine } from './types.ts'
 
 export const name = 'remote-registry'
@@ -45,9 +46,9 @@ const machineSchema = z.object({
 // before any medium is touched"，见 dsh-storage-domain 的文档注释），
 // 'remote-registry' 这个名字实测直接炸；换成下划线形式。
 const REMOTE_DOMAIN = defineDomain({
-  name: 'remote_registry',
+  name: REMOTE_DOMAIN_NAME,
   version: 1,
-  tables: { machines: domainTable<string, RemoteMachine>(machineSchema) },
+  tables: { [MACHINES_TABLE]: domainTable<string, RemoteMachine>(machineSchema) },
 })
 
 /**

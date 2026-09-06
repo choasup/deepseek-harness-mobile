@@ -189,10 +189,23 @@ cd ios && ./deploy-device.sh
 ```
 
 **前置条件，而且只能你自己做一次**：Xcode → Settings → Accounts 登录 Apple ID。
-自动签名要靠这个账号去创建 App ID 和描述文件；钥匙串里有开发证书是不够的，
-没登录会报 `No Account for Team "…"`。
+自动签名要靠这个账号去创建 App ID 和描述文件；钥匙串里有开发证书是不够的。
 
-装上之后手机上可能还要：设置 → 通用 → VPN与设备管理 → 开发者App → 信任。
+**`project.yml` 里的 `DEVELOPMENT_TEAM` 要填「登录账号的 team」，不是「钥匙串里
+证书的 team」。** 这台机器上两者不同：钥匙串里是机构证书 `3L724S787J`，
+而 Xcode 登录的是免费个人 team `4752F9442A`。填错时报的还是
+`No Account for Team "…"`——看着像没登录，实际是登录的账号没有那个 team，
+很容易在这里反复排查登录状态。查法：
+
+```bash
+plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep -A2 teamID
+```
+
+装上之后：
+
+- 手机要**解锁**，否则 `devicectl … process launch` 报 `BSErrorCodeDescription = Locked`。
+- 第一次运行要信任证书：设置 → 通用 → VPN与设备管理 → 开发者App → 信任。
+- **免费个人 team 签出来的 app 7 天后过期**，到期重跑一次 `./deploy-device.sh`。
 
 **然后要解决地址问题。** 真机上默认的 `127.0.0.1` 指的是手机自己，必然连不上，
 app 会自动弹出连接设置让你填 Mac 的局域网地址。Mac 那边要把 host 起在局域网上

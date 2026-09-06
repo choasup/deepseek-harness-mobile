@@ -45,7 +45,13 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
-        # 真机要签名。自动签名 + 开发者团队；上架不在这一轮的目标里，
-        # 装到自己设备上用开发证书就够。
+        # 真机要签名。这里是 Xcode 里登录的那个账号的 team，**不是**钥匙串里
+        # 证书的 team——这台机器上两者不同：钥匙串有一张机构证书
+        # (3L724S787J)，但 Xcode 登录的是免费个人 team (4752F9442A)。
+        # 填错的报错是 `No Account for Team "…"`，看着像"没登录"，
+        # 实际是"登录的账号没有这个 team"。
+        # 查法：plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep teamID
+        #
+        # 免费个人 team 的限制：签出来的 app **7 天后过期**，到期要重装。
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 3L724S787J
+        DEVELOPMENT_TEAM: 4752F9442A

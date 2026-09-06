@@ -5,13 +5,21 @@
 # 登录 Apple ID。自动签名要靠这个账号去创建 App ID 和描述文件；只有钥匙串里
 # 那张开发证书是不够的，会报：
 #   No Account for Team "…". Add a new account in Accounts settings
+#
+# 注意 project.yml 里的 DEVELOPMENT_TEAM 要填**登录账号的 team**，不是钥匙串
+# 里证书的 team——这台机器上两者不同。同样报 `No Account for Team`，
+# 看着像没登录，实际是登录的账号没有那个 team。查法：
+#   plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep teamID
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DEVICE_ID="${1:-}"
 if [[ -z "$DEVICE_ID" ]]; then
+  # 按 UUID 形状抓，不要按列号——`devicectl list devices` 的 Model 列
+  # 含空格（"iPhone 17 Pro Max (iPhone18,2)"），数列会抓到 "17"。
   DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null \
-    | awk '/connected/ {print $(NF-3); exit}')
+    | grep -oE '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' \
+    | head -1)
 fi
 if [[ -z "$DEVICE_ID" ]]; then
   echo "没找到已连接的设备。插上 iPhone 并在手机上点「信任此电脑」。" >&2

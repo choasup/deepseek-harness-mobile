@@ -108,6 +108,25 @@ index 7780ae10..6747338e 100644
        ['OS=="freebsd"', {
          'ldflags': [
            '-Wl,--export-dynamic',
+diff --git a/common_node.gypi b/common_node.gypi
+index 0bfbf728..745f61d3 100644
+--- a/common_node.gypi
++++ b/common_node.gypi
+@@ -6,7 +6,13 @@
+         'cflags_cc!': ['-std=gnu++17'],
+         'cflags_cc': ['-std=gnu++20'],
+       }],
+-      ['OS=="mac" and clang==1', {
++      # dsh-mobile: 加上 ios。这个文件在 Node 18 时代还不存在（Node 核心改用
++      # C++20 是之后的事），所以 nodejs-mobile 的补丁里没有对应项——版本抬升
++      # 不能机械 replay，新增的条件分支要自己找出来。
++      # 症状：deps/ncrypto 用了 operator<=>（C++20 飞船运算符），在 gnu++17 下
++      # 被拆成 operator<= 和 >，报 "'operator<=' cannot be the name of a
++      # variable or data member"——错误信息完全不提 C++ 标准。
++      ['(OS=="mac" or OS=="ios") and clang==1', {
+         'xcode_settings': {
+           'CLANG_CXX_LANGUAGE_STANDARD': 'gnu++20',  # -std=gnu++20
+         },
 diff --git a/configure.py b/configure.py
 index 24159408..3fc14c3a 100755
 --- a/configure.py
@@ -134,6 +153,28 @@ index 24159408..3fc14c3a 100755
    if options.dest_os == 'android':
      o['variables']['OS'] = 'android'
    o['variables']['node_prefix'] = options.prefix
+diff --git a/deps/cares/config/darwin/ares_config.h b/deps/cares/config/darwin/ares_config.h
+index 6187024a..edb23243 100644
+--- a/deps/cares/config/darwin/ares_config.h
++++ b/deps/cares/config/darwin/ares_config.h
+@@ -329,7 +329,17 @@
+ #define HAVE_SYS_PARAM_H 1
+ 
+ /* Define to 1 if you have the <sys/random.h> header file. */
++/* dsh-mobile: cares.gyp 把 iOS 也指向这份 darwin 配置（上游写的是
++   `OS=="mac" or OS=="ios"`），但 **iOS SDK 没有 sys/random.h**，macOS SDK 才有。
++   照抄下去编不过：ares_rand.c 的 `#ifdef HAVE_SYS_RANDOM_H` 会去 include 它。
++   关掉是安全的——这个头只为 getrandom() 服务，而 ares_rand.c 的主路径是
++   arc4random_buf()，iOS 上有。 */
++#if defined(__APPLE__)
++#  include <TargetConditionals.h>
++#endif
++#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
+ #define HAVE_SYS_RANDOM_H 1
++#endif
+ 
+ /* Define to 1 if you have the <sys/select.h> header file. */
+ #define HAVE_SYS_SELECT_H 1
 diff --git a/node.gyp b/node.gyp
 index d604e0dd..6e343b76 100644
 --- a/node.gyp

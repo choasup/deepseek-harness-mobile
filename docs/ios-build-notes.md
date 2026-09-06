@@ -247,3 +247,38 @@ iPhoneOS26.4.sdk              44 处
 Node 18 那轮 `out/` 实测 20 GB，而这台机器当时只剩 15 GB。在 iOS 块里加
 `GCC_GENERATE_DEBUGGING_SYMBOLS: 'NO'`，生成的 makefile 里 `-gdwarf` 归零。
 要的是能在设备上跑的静态库，不是能在 lldb 里单步的静态库。
+
+### 3.6 失败 #3：ncrypto 的 `operator<=>` —— 一个 Node 18 时代不存在的移植点
+
+```
+ncrypto.h:367: error: 'operator<=' cannot be the name of a variable or data member
+  int operator<=>(const BignumPointer& other) const noexcept;
+```
+
+`operator<=>` 是 C++20 的飞船运算符，在 `-std=gnu++17` 下被拆成 `<=` 和 `>`。
+**错误信息完全不提 C++ 标准**，看着像 ncrypto 自己有语法错误。
+
+真因在 `common_node.gypi`——Node **核心**单独覆盖成 C++20（`common.gypi` 全局
+仍是 gnu++17），而它的条件写的是 `OS=="mac" and clang==1`，没有 ios。
+
+**这个文件在 Node 18 时代不存在**（核心改用 C++20 是之后的事），所以
+nodejs-mobile 的补丁里没有任何对应项。这是版本抬升不能机械 replay 的典型：
+新增的条件分支只能靠"编一次、看它在哪炸"找出来。
+
+### 3.7 失败 #4：iOS SDK 没有 `sys/random.h`
+
+```
+ares_rand.c: fatal error: 'sys/random.h' file not found
+```
+
+`deps/cares/cares.gyp` 里上游**已经写了** `OS=="mac" or OS=="ios"`，但把两者都
+指向 `config/darwin`——而那份配置 `#define HAVE_SYS_RANDOM_H 1`。
+实测：macOS SDK 有这个头，**iOS SDK 没有**。
+
+解法是在那个 define 外面加 `TARGET_OS_IPHONE` 守卫。关掉它是安全的：这个头只
+为 `getrandom()` 服务，而 `ares_rand.c` 的主路径是 `arc4random_buf()`
+（`HAVE_ARC4RANDOM_BUF 1` 已开、`HAVE_GETRANDOM` 本来就是 undef）。
+
+**模式识别**：这是本次构建里第三个"新 SDK / 新平台 × 老第三方配置"的问题
+（前两个是 zlib 的经典 Mac 分支、gyp 生成器只认 mac）。共同形态是
+**某个平台假设被写死在一个第三方目录里**，而错误信息指向使用点、不指向假设。

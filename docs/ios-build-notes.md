@@ -362,3 +362,38 @@ __APPLE__`，而 iOS 也满足。
 这是本次构建第四个"平台假设写死在 `__APPLE__` 里"的问题
 （前三个：zlib 的 `TARGET_OS_MAC`、c-ares 的 darwin 配置、gyp 生成器只认 mac）。
 **`__APPLE__` 在 iOS 上为真，是这整类问题的共同来源。**
+
+### 3.13 失败 #9：host 没给 ARCHS，回落到 x86_64 去读 arm64 汇编
+
+```
+<inline asm>:12:3: error: unknown use of instruction mnemonic without a size suffix
+   12 |   mov x7, x2
+<inline asm>:14:3: error: invalid instruction mnemonic 'blr'
+```
+
+`blr` 是 ARM64 指令，报错却是 **x86 汇编器**的口吻（"without a size suffix"
+是 x86 要 `movq`/`movl` 那种后缀时说的话）。
+
+按 toolset 拆开之后，host 分支没有 `ARCHS`，`xcode_emulation` 就回落到它的历史
+默认值 **x86_64**；而 V8 的汇编文件是按 `target_arch`（arm64）选的。于是
+`obj.host/.../asm/arm64/push_registers_asm.cc` 被 `-arch x86_64` 编译。
+
+诊断关键：**同一个源文件在 target 和 host 各编一次**，只有 host 那次失败。
+把两条编译行拉出来对比，差别一眼可见：
+
+```
+obj.target/... push_registers_asm.o   -arch arm64     ✓
+obj.host/...   push_registers_asm.o   -arch x86_64    ✗
+```
+
+解法是在 host 分支按 `host_arch`（`config.gypi` 里有，这台机器是 `arm64`）
+显式指定 `ARCHS`。
+
+**这条与 #5 是一对**：#5 是 host 拿了 target 的 SDK，#9 是 host 没拿到自己的
+架构。交叉编译里 host/target 的每一项设置都要单独确认，"没设置"不等于
+"用合理默认值"——gyp 的默认值是 2010 年的。
+
+nodejs-mobile 在 `push_registers_asm.cc` 里加 `#ifndef V8_TARGET_ARCH_ARM`
+守卫，处理的是同一类错位（他们的注释原话："we compile both host and target
+code but with flags that reflect only the target platform"）。我们这边用给
+host 补 `ARCHS` 解决，不改 V8 源码——**修配置比修源码更容易随版本移植**。

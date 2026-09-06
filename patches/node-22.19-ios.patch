@@ -1,5 +1,5 @@
 diff --git a/common.gypi b/common.gypi
-index 7780ae10..6edf6e92 100644
+index 7780ae10..285a1347 100644
 --- a/common.gypi
 +++ b/common.gypi
 @@ -108,7 +108,7 @@
@@ -38,7 +38,7 @@ index 7780ae10..6edf6e92 100644
          'xcode_settings': {
            'OTHER_CFLAGS+': [
              '-fno-omit-frame-pointer',
-@@ -690,6 +690,100 @@
+@@ -690,6 +690,116 @@
            }],
          ],
        }],
@@ -126,6 +126,22 @@ index 7780ae10..6edf6e92 100644
 +              'IPHONEOS_DEPLOYMENT_TARGET': '',
 +              'MACOSX_DEPLOYMENT_TARGET': '11.0',
 +            },
++            # ARCHS 必须显式给。不给的话 xcode_emulation 回落到它的历史默认
++            # x86_64，而 V8 的汇编文件是按 target_arch(arm64) 选的，于是拿
++            # x86 汇编器去读 arm64 汇编：
++            #     <inline asm>:14:3: error: invalid instruction mnemonic 'blr'
++            #     <inline asm>:12:3: error: unknown use of instruction mnemonic
++            #                              without a size suffix
++            # 报错只说指令不认识，不说 -arch 是什么——要从编译行里看
++            # obj.host 那条带的是 -arch x86_64。
++            'conditions': [
++              ['host_arch=="arm64"', {
++                'xcode_settings': {'ARCHS': ['arm64']},
++              }],
++              ['host_arch=="x64"', {
++                'xcode_settings': {'ARCHS': ['x86_64']},
++              }],
++            ],
 +          }],
 +          ['_type!="static_library"', {
 +            'xcode_settings': {

@@ -142,16 +142,23 @@
 - id: sandbox
   disabled: true
 
-# ── B. 新增：mobile 专属的三个插件行 ──────────────────────────────────
+# ── B. 新增：mobile 专属的四个插件行 ──────────────────────────────────
 #
-# 三条的 `name` 都写成 **profile 相对路径**（`./node_modules/...`）而不是
-# 包名。这不是风格选择：`cordis-plugin-loader` 对裸标识符的 `import()`
-# **不使用 profile 的 baseUrl**，只有以 `.` 开头的路径才走 baseUrl。用包名
-# 写的行会报 ERR_MODULE_NOT_FOUND——Node 相对 loader 自己的位置（全局 dsh
-# 安装目录）去解析，那里当然没有 `@dsh-mobile/*`。这跟本仓库无关，是这台
-# 机器上所有第三方 bundle 的共同处境：同一份 loader 下，`headless` profile
-# 里的 `@tencentcloudadp/dsh-adp` 一样中招，而 `dsh plugin add` 只是"在
-# profile 目录里跑 pnpm"的转发器，产出的正是这个布局。
+# `name` 用**裸包名**，跟 dsh 自己的补丁写法一致。
+#
+# 订正：这里原先写着"必须用 profile 相对路径，因为 loader 对裸标识符的
+# import() 不使用 baseUrl"——**那是错的**，已实测证伪：四条全换成裸包名后
+# `dsh --profile mobile` 照常启动，`file:` 副本安装和 `link:` 软链安装都试过。
+# 失败时 loader 的报错原文是 `imported from /Users/<u>/.dsh/profiles/<name>/`，
+# 也就是说它本来就相对 profile 目录解析。当初那次 ERR_MODULE_NOT_FOUND 的真实
+# 原因是包还没被装成 profile 的直接依赖，被我错误地归纳成了 loader 的限制。
+#
+# 真正的约束只有一条，而且是 pnpm 的：**四个包都要列为 profile 的直接依赖**，
+# 因为 pnpm 只把直接依赖提到 node_modules 顶层。这跟写路径还是写包名无关。
+#
+# 另外注意 profile 的 `bundles` 走的是另一条解析路径
+# （`dsh-app-boot` 的 `resolveBundleDir`），报错长得不一样
+# （`cannot resolve profile bundle "..."`），别把两者混为一谈。
 - insert:
     # 注意：**storage 三层不在这里**。
     #
@@ -167,7 +174,7 @@
     # （仓库 README 的安装步骤有现成的），基于 web-app 的则不需要。
 
     - id: remote-registry
-      name: './node_modules/@dsh-mobile/remote-registry/lib/plugin.js'
+      name: '@dsh-mobile/remote-registry/plugin'
 
     # 未配置机器时会发生什么（改过一版，见下方"这版为什么变了"）
     # ────────────────────────────────────────────────────────────────
@@ -211,7 +218,7 @@
     # `remote-registry`（`domain/changed` 已经带够信息可以过滤），但需要
     # 一次独立的实现 + 测试，这里不顺手做。
     - id: shell-ssh
-      name: './node_modules/@dsh-mobile/shell-ssh/lib/plugin.js'
+      name: '@dsh-mobile/shell-ssh/plugin'
       config:
         # 全新安装时几乎肯定查不到这个名字——这是预期状态，不是配置错误：
         # 见上面大段注释，查不到时这一行只是安静地不提供 ctx.shell。用户
@@ -223,8 +230,16 @@
     # 它注入 fs 而不是 subprocess——iOS 上起不了进程，但读文件可以。
     # 工具名、参数 schema、输出 schema、系统提示词的 order 全部与 dsh 的实现
     # 对齐（有 parity 测试守住），所以对模型而言这次替换是透明的。
+    # 移动版外框，顶替上面禁掉的 ui-layout。
+    # 注意它同时**接管了主题投影**：把设计令牌写进 document.body 这件事，
+    # dsh 是顺手放在 layout 包里做的（那个包的 README：the package also
+    # seats the theme presenter）。换掉 layout 而不接这一步，后果不是"主题
+    # 不对"，是所有 --dsw-* 变量没人写，整个界面全部掉成无样式。
+    - id: ui-layout-mobile
+      name: '@dsh-mobile/client-ui-layout-mobile'
+
     - id: tool-fs-search-js
-      name: './node_modules/@dsh-mobile/tool-fs-search/lib/plugin.js'
+      name: '@dsh-mobile/tool-fs-search/plugin'
 
 
 # ── D. MCP：不新增行，只留一条约束说明 ────────────────────────────────
@@ -284,4 +299,27 @@
 #
 # 要恢复它，需要的是一个不含 shell 行的移动端 preset，而不是打开这一行。
 - id: agent-presets
+  disabled: true
+
+# ── G. 换掉桌面版 layout（只在叠加 dsh-web-app 时存在这一行）───────────
+#
+# `dsh-client-ui-layout` 是三栏 AppFrame：侧栏 | 会话 | 详情，栏间有 8px 拖拽
+# 把手，侧栏收起后仍常驻一条 56px 控制条。在手机上这套的问题不是"挤"，
+# 是每一条都用不上：竖栏白占宽度、8px 把手手指点不中（iOS HIG 最小触控目标
+# 是 44pt）、三栏让路链在单列宽度下没有意义。
+#
+# 换成 `@dsh-mobile/client-ui-layout-mobile`：单栏 + 顶栏菜单键，侧栏改左侧
+# 抽屉、详情改底部 sheet，两者都用 transform 移出屏幕而不卸载（占位插件的
+# 内部状态因此保留，与桌面版"width 0 但子树仍挂载"同一约定）。
+#
+# 其余 32 个客户端 UI 插件**一个都不用动**：它们注册的目标是 slot 名
+# （sidebar / conversation / details / shell.overlay），不是某个具体的 layout
+# 包。新的外框把这四个名字一字不差地声明出来，注册就照常落位。
+#
+# 这一步能成立的前提是：客户端 UI 插件是**运行时**从
+# `/plugins/<包名>/client.js` 拉的，不是编译进 dsh-web-frontend 的 dist。
+# `dsh-client-modules` 的 README 原话：Node 半边"扫描已启用的 Loader 条目，
+# 找出带 dsh.client 的 web 包，解析各自的 exports['./client']"再挂到
+# /plugins 下。所以换 layout 不需要重建 dsh 的前端。
+- id: ui-layout
   disabled: true

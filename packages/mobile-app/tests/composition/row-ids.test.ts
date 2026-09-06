@@ -103,9 +103,9 @@ describe.skipIf(!ready)('插入的行 id 不能与 dsh 自己的行冲突', () =
  * `mobile-app` 只是一个"带 YAML 补丁的 bundle"，不能把另外三个包声明成自己的
  * 依赖——两个理由，第二个是硬的：
  *
- * 1. 补丁里的插件路径是 `./node_modules/@dsh-mobile/…`，由 loader 相对
- *    **profile 的 baseUrl** 解析。装在 `mobile-app` 自己 node_modules 里的
- *    嵌套副本永远不会被加载，纯属误导。
+ * 1. 补丁里的插件条目由 loader 相对 **profile 的 baseUrl** 解析，找的是
+ *    profile 顶层那一份。装在 `mobile-app` 自己 node_modules 里的嵌套副本
+ *    永远不会被加载，纯属误导。
  * 2. 这三个包在仓库里是 `workspace:*`。一旦这么写进 dependencies，用户在自己
  *    的 profile 目录里跑 `pnpm install` 就会失败：
  *    `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND: "@dsh-mobile/tool-fs-search@workspace:*"

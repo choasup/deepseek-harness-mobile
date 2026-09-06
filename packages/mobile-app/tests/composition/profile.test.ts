@@ -86,6 +86,8 @@ const MUST_DISABLE = [
   // 只在叠加 dsh-web-app 时存在。三个自带 preset 都挂持久 shell，
   // 在 iOS 上一个都挂不上，而失败表现是"点工作区没反应"，没有可见报错。
   'agent-presets',
+  // 同样只在 dsh-web-app 组合里存在：桌面三栏外框，换成移动版单栏外框。
+  'ui-layout',
 ]
 
 const MUST_STAY_ENABLED = [
@@ -148,11 +150,11 @@ describe('C. 挂上 remote-registry 与 shell-ssh，且用 profile 相对路径�
   const byId = (id: string) => inserted.find((row) => row.id === id)
 
   it('remote-registry 用 profile 相对路径', () => {
-    expect(byId('remote-registry')?.name).toBe('./node_modules/@dsh-mobile/remote-registry/lib/plugin.js')
+    expect(byId('remote-registry')?.name).toBe('@dsh-mobile/remote-registry/plugin')
   })
 
   it('shell-ssh 用 profile 相对路径', () => {
-    expect(byId('shell-ssh')?.name).toBe('./node_modules/@dsh-mobile/shell-ssh/lib/plugin.js')
+    expect(byId('shell-ssh')?.name).toBe('@dsh-mobile/shell-ssh/plugin')
   })
 
   it('两行的 name 都不是裸包名（不能没有 /plugin 后缀）', () => {

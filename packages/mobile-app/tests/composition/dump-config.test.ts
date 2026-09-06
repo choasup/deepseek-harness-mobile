@@ -176,7 +176,7 @@ const DISABLED_AND_PRESENT = [
 // 根本没有这一行。禁用它是因为三个自带 preset 都挂持久 shell，在 iOS 上
 // 一个都挂不上——而 preset 挂载失败会让 session.create 整个失败，前端不显示
 // 任何报错（表现为"点工作区没反应"）。详见 cordis.patch.yml 的 F 段。
-const ABSENT_NOT_DISABLED = ['terminal-bash', 'tmux-context', 'agent-presets']
+const ABSENT_NOT_DISABLED = ['terminal-bash', 'tmux-context', 'agent-presets', 'ui-layout']
 
 const MUST_STAY_ENABLED = [
   'tool-fs',
@@ -193,8 +193,10 @@ const OUR_ADDITIONS: Array<{ id: string; name: string }> = [
   { id: 'storage', name: '@deepseek-ai/dsh-storage' },
   { id: 'storage-json', name: '@deepseek-ai/dsh-storage-json' },
   { id: 'storage-domain', name: '@deepseek-ai/dsh-storage-domain' },
-  { id: 'remote-registry', name: './node_modules/@dsh-mobile/remote-registry/lib/plugin.js' },
-  { id: 'shell-ssh', name: './node_modules/@dsh-mobile/shell-ssh/lib/plugin.js' },
+  { id: 'remote-registry', name: '@dsh-mobile/remote-registry/plugin' },
+  { id: 'shell-ssh', name: '@dsh-mobile/shell-ssh/plugin' },
+  { id: 'ui-layout-mobile', name: '@dsh-mobile/client-ui-layout-mobile' },
+  { id: 'tool-fs-search-js', name: '@dsh-mobile/tool-fs-search/plugin' },
 ]
 
 describe.skipIf(!READY)('real dsh composes the mobile profile (Task 13, Step 2)', () => {

@@ -17,13 +17,14 @@ iOS 第三方 app **不能 fork/exec**：容器沙箱拒绝 `process-exec`，AMF
 存在的全部理由。所以 mobile profile 必须禁掉 dsh 里一切依赖本地进程的插件，
 并把执行路由到远程机器。
 
-## 三个包
+## 五个包
 
 | 包 | 职责 |
 | --- | --- |
 | `@dsh-mobile/remote-registry` | 远程机器注册表、`dsh-remote://` 剪贴板导入、五阶段连接探针 |
 | `@dsh-mobile/shell-ssh` | SSH 连接池（含主机指纹校验）、远程执行、dsh `ShellExecutor` 实现 |
 | `@dsh-mobile/tool-fs-search` | 纯 JS 的 `glob` / `grep`，顶替 dsh 那个靠 ripgrep 二进制的实现 |
+| `@dsh-mobile/client-ui-layout-mobile` | 移动版单栏外框，顶替 dsh 的三栏 `ui-layout`（连带接管主题投影） |
 | `@dsh-mobile/mobile-app` | mobile profile 的 `cordis.patch.yml` |
 
 ## 安装
@@ -62,7 +63,7 @@ cat > ~/.dsh/profiles/mobile/cordis.patch.yml <<'YAML'
 YAML
 ```
 
-然后把四个包都装进 profile。**先写 `pnpm-workspace.yaml`**，缺了它
+然后把五个包都装进 profile。**先写 `pnpm-workspace.yaml`**，缺了它
 `pnpm install` 会直接失败（理由见下面的约束 ④）：
 
 ```bash
@@ -74,15 +75,18 @@ packages:
 nodeLinker: hoisted
 autoInstallPeers: false
 overrides:
-  '@dsh-mobile/remote-registry': file:$REPO/packages/remote-registry
-  '@dsh-mobile/shell-ssh': file:$REPO/packages/shell-ssh
-  '@dsh-mobile/tool-fs-search': file:$REPO/packages/tool-fs-search
+  '@dsh-mobile/remote-registry': link:$REPO/packages/remote-registry
+  '@dsh-mobile/shell-ssh': link:$REPO/packages/shell-ssh
+  '@dsh-mobile/tool-fs-search': link:$REPO/packages/tool-fs-search
+  '@dsh-mobile/client-ui-layout-mobile': link:$REPO/packages/client-ui-layout-mobile
 YAML
 
-pnpm add file:$REPO/packages/mobile-app \
-         file:$REPO/packages/remote-registry \
-         file:$REPO/packages/shell-ssh \
-         file:$REPO/packages/tool-fs-search
+# 开发期用 link:（软链，改了源码不必重装）；要固定副本就把 link: 换成 file:
+pnpm add link:$REPO/packages/mobile-app \
+         link:$REPO/packages/remote-registry \
+         link:$REPO/packages/shell-ssh \
+         link:$REPO/packages/tool-fs-search \
+         link:$REPO/packages/client-ui-layout-mobile
 ```
 
 pnpm 会说 `Ignored build scripts: cpu-features, ssh2`——**这是想要的结果**，
@@ -91,17 +95,17 @@ pnpm 会说 `Ignored build scripts: cpu-features, ssh2`——**这是想要的�
 
 ### 四个必须知道的安装约束
 
-**① 四个包都要列为 profile 的直接依赖，不能只装 `mobile-app`。**
+**① 五个包都要列为 profile 的直接依赖，不能只装 `mobile-app`。**
 
-补丁里的插件条目写的是 profile 相对路径（`./node_modules/@dsh-mobile/…/lib/plugin.js`）
-而不是包名。原因写在补丁自己的注释里，简述：`cordis-plugin-loader` 对**裸标识符**
-的 `import()` 不使用 `baseUrl`，Node 因而相对 loader 自己的位置（全局 dsh 安装目录）
-解析，看不见装在 profile 里的包。只有以 `.` 开头的路径才走 `baseUrl`。
+pnpm 只把**直接依赖**提到 `node_modules` 顶层，而补丁里的插件条目由 loader
+相对 profile 目录解析，找的就是顶层那一份。少列一个，那一行就 404。
 
-这不是本项目特有的问题——装了 `@tencentcloudadp/dsh-adp` 的 profile 同样报
-`Cannot find package`，而 `dsh plugin add` 本身只是"在 profile 目录里跑 pnpm"的转发器。
-
-代价就是这条：pnpm 只把**直接依赖**提到 `node_modules` 顶层，所以四个包都得列上。
+> 这里原先写着另一套理由：「补丁必须用 `./node_modules/…` 相对路径，因为
+> loader 对裸标识符的 `import()` 不使用 `baseUrl`」。**那是错的**，已实测证伪：
+> 全部换成裸包名后照常启动（`file:` 副本装和 `link:` 软链装都试过），而失败
+> 时 loader 的报错原文是 `imported from ~/.dsh/profiles/<name>/`——它本来就
+> 相对 profile 解析。当初那次 `ERR_MODULE_NOT_FOUND` 的真实原因就是这一条
+> 「没装成直接依赖」，被错误归纳成了 loader 的限制。
 
 **② 用 Node 22.19+ 或 24 跑 dsh。**
 
@@ -188,9 +192,23 @@ WebView 面对的都是同一个 loopback HTTP + WebSocket 端点，加载同一
 起来之后如果没配过模型凭据，会先弹"添加一个 API Key 开始使用"，输入框显示
 "当前模型不可用，请先选择模型"——那是缺凭据，不是这一层的问题。
 
-界面用的还是**桌面版布局**：左边一条图标竖栏白占宽度、上方大片留白、
-输入框浮在屏幕中间、下拉菜单是鼠标尺寸。换成移动布局插件（保留其余 UI 插件、
-按 slot 复用）还没做。
+### 界面是移动布局，不是缩小的桌面版
+
+`@dsh-mobile/client-ui-layout-mobile` 顶掉了 dsh 的三栏 `ui-layout`：
+单栏 + 顶栏菜单键，侧栏改左侧抽屉，详情改底部 sheet，触控目标按 44pt 起。
+
+**其余 32 个客户端 UI 插件一个都没改。** 它们注册的目标是 slot 名
+（`sidebar` / `conversation` / `details` / `shell.overlay`），不是某个 layout 包；
+新外框把这四个名字一字不差地声明出来，注册就照常落位——抽屉里那个完整的
+侧栏就是原样的 `ui-sidebar`。
+
+这一步之所以不用重建 dsh 的前端，是因为客户端 UI 插件是**运行时**从
+`/plugins/<包名>/client.js` 拉的（`dsh-client-modules` 的 Node 半边扫描已启用
+的 Loader 条目，找带 `dsh.client` 的包）。禁掉一行、插进一行就换掉了。
+
+代价是这个包**必须连主题投影一起接管**：把设计令牌写进 `document.body`
+这件事 dsh 是顺手放在 layout 包里做的。不接的话不是"主题不对"，是所有
+`--dsw-*` 变量没人写，整个界面全部掉成无样式。
 
 ## 诚实的限制
 
@@ -209,6 +227,14 @@ WebView 面对的都是同一个 loopback HTTP + WebSocket 端点，加载同一
   自己从未追踪过的键"。发一个只合并不清理的实现会看起来支持、实则长期供应陈旧值。
 - **没有本地沙箱。** iOS 的 app 容器本身就是边界。`ShellRunResult.sandbox` 不填、
   `sandboxMode` 返回 `undefined`——宁可什么都不声称，也不声称一个假的约束。
+- **移动布局插件手抄了 dsh 的 slot 契约，没有类型保证。** 它不 import
+  `dsh-client-ui-layout`（装上时那个包是禁用的，且 client bundle 自包含），
+  所以 slot 名/kind/scope 与 `ILayout` 方法集都是照 `.d.ts` 抄的。抄错或
+  dsh 升级后契约变了，**不会有编译错误**——表现是那一格的注册全部落空、
+  界面空白且无报错。`tests/unit/contract.test.ts` 拿真实安装里的 `.d.ts`
+  对账就是为了兜住这一点，但它依赖 dsh 装在 Homebrew 的默认路径，
+  换路径就会 skip。
+- **底部 sheet 只能点把手关闭，不能下拉。** 没做拖拽手势。
 - **`glob` / `grep` 是重新实现的。** 输出格式复用 dsh 自己的导出，工具定义有
   parity 测试逐字段守住；与真实 ripgrep 的差分测试覆盖了 glob 方言、两个工具
   各自不同的忽略语义、排序，以及 `.gitignore`。

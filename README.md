@@ -62,17 +62,34 @@ cat > ~/.dsh/profiles/mobile/cordis.patch.yml <<'YAML'
 YAML
 ```
 
-然后把四个包都装进 profile：
+然后把四个包都装进 profile。**先写 `pnpm-workspace.yaml`**，缺了它
+`pnpm install` 会直接失败（理由见下面的约束 ④）：
 
 ```bash
+REPO=<仓库绝对路径>
 cd ~/.dsh/profiles/mobile
-pnpm add file:<仓库路径>/packages/mobile-app \
-         file:<仓库路径>/packages/remote-registry \
-         file:<仓库路径>/packages/shell-ssh \
-         file:<仓库路径>/packages/tool-fs-search
+cat > pnpm-workspace.yaml <<YAML
+packages:
+  - .
+nodeLinker: hoisted
+autoInstallPeers: false
+overrides:
+  '@dsh-mobile/remote-registry': file:$REPO/packages/remote-registry
+  '@dsh-mobile/shell-ssh': file:$REPO/packages/shell-ssh
+  '@dsh-mobile/tool-fs-search': file:$REPO/packages/tool-fs-search
+YAML
+
+pnpm add file:$REPO/packages/mobile-app \
+         file:$REPO/packages/remote-registry \
+         file:$REPO/packages/shell-ssh \
+         file:$REPO/packages/tool-fs-search
 ```
 
-### 三个必须知道的安装约束
+pnpm 会说 `Ignored build scripts: cpu-features, ssh2`——**这是想要的结果**，
+不用去 approve：那两个是 ssh2 的原生加速件，跳过后 ssh2 走纯 JS 实现，
+而纯 JS 正是这个项目要的（iOS 上没有原生模块可加载）。
+
+### 四个必须知道的安装约束
 
 **① 四个包都要列为 profile 的直接依赖，不能只装 `mobile-app`。**
 
@@ -103,6 +120,22 @@ bundle 里只有 `dsh-web-app` 挂了 storage，`dsh-base`/`dsh-headless` 都没
 
 所以归属是 profile 级——**基于 `dsh-web-app` 的 profile 不要加这一段**，
 它自带 storage。
+
+**④ profile 目录里必须有 `pnpm-workspace.yaml`，两个设置都不能少。**
+
+`nodeLinker: hoisted` —— `shell-ssh` 真的 `import` 了 `remote-registry`
+（机器与凭据的类型、探针都定义在那边）。pnpm 默认的隔离布局不会让它看到
+profile 顶层那一份，只有 hoisted 布局下 Node 才能沿目录向上走到
+`~/.dsh/profiles/<name>/node_modules/@dsh-mobile/remote-registry`。
+这也是约束 ① 说"四个包都要列为直接依赖"的另一半原因。
+
+`overrides` —— 仓库内部这些包互相写的是 `workspace:*`。profile 目录不是那个
+workspace，不覆盖就会报：
+
+```
+ERR_PNPM_WORKSPACE_PKG_NOT_FOUND: "@dsh-mobile/remote-registry@workspace:*"
+is in the dependencies but no package named ... is present in the workspace
+```
 
 ## 注册一台远程机器
 
@@ -135,10 +168,11 @@ storage 补丁，加了会抛 `duplicate loader entry id: storage`。
 mkdir -p ~/.dsh/profiles/mobile-web
 sed 's/dsh-headless/dsh-web-app/; s/dsh-profile-mobile/dsh-profile-mobile-web/' \
   ~/.dsh/profiles/mobile/package.json > ~/.dsh/profiles/mobile-web/package.json
+cp ~/.dsh/profiles/mobile/pnpm-workspace.yaml ~/.dsh/profiles/mobile-web/
 printf '[]\n' > ~/.dsh/profiles/mobile-web/cordis.patch.yml
-cd ~/.dsh/profiles/mobile-web && pnpm install   # 依赖同上面的四个包
+cd ~/.dsh/profiles/mobile-web && pnpm install
 
-dsh --profile mobile-web web    # 监听 127.0.0.1:7799
+dsh --profile mobile-web --port 7799 --no-open
 ```
 
 **这一版的 runtime 还在 Mac 上，不在设备里。** 模拟器与宿主共享网络栈，所以
@@ -151,7 +185,12 @@ expose remote code execution to the network"），所以真机不是改个 IP �
 WebView 面对的都是同一个 loopback HTTP + WebSocket 端点，加载同一份前端。
 换过去时改的是 `HarnessEndpoint.current`，不是别的。
 
-界面用的还是桌面版布局（按 slot 换成移动布局插件是后面的事），在手机屏上偏挤。
+起来之后如果没配过模型凭据，会先弹"添加一个 API Key 开始使用"，输入框显示
+"当前模型不可用，请先选择模型"——那是缺凭据，不是这一层的问题。
+
+界面用的还是**桌面版布局**：左边一条图标竖栏白占宽度、上方大片留白、
+输入框浮在屏幕中间、下拉菜单是鼠标尺寸。换成移动布局插件（保留其余 UI 插件、
+按 slot 复用）还没做。
 
 ## 诚实的限制
 

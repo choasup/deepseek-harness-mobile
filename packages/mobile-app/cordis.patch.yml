@@ -50,9 +50,16 @@
 # 从未被真正装载过——它只出现在 `dsh-agent-presets` 挂载的 agent preset
 # （`config/agent-presets/*/agent.cordis.yml`，例如 `minimal` 预设的
 # `persistent-shell` 分组）里，而 headless 模式完全不挂 agent-presets（那是
-# `dsh-web-app` 专属的机制，`dsh-headless` 的补丁里没有这一行）。这里仍然
-# 显式禁用它是防御性的：万一将来 mobile profile 改成基于 `dsh-web-app`
-# （带 preset）的组合，这条禁用不会因为"当前这份组合里根本用不上"而被漏掉。
+# `dsh-web-app` 专属的机制，`dsh-headless` 的补丁里没有这一行）。
+#
+# **订正**：这里原本写着"显式禁用是防御性的，将来换成 dsh-web-app 组合时
+# 不会漏"——那是错的，已被实测证伪。补丁作用于 **profile 的插件树**，
+# preset 是**另一份组合**，这条禁用够不到它。真换成 dsh-web-app 之后，
+# preset 照样挂 `terminal-bash`，失败信息是：
+#     agent-presets: preset "minimal" failed to mount: 1 row(s) did not
+#     activate: terminal-bash (...): waiting for subprocess
+# 后果不是"少一个工具"，是 `session.create` 直接失败——界面上表现为
+# **点了工作区选不中，没有任何报错**。真正的处理见下面 F 段。
 - id: terminal-bash
   disabled: true
 
@@ -253,3 +260,28 @@
 # dsh does not install these optional providers"）——`codex`/`claude-code`
 # provider 本身就是各自 fork 一个外部 CLI 子进程，同样撞在 iOS 的
 # process-exec 限制上，不需要本文件额外处理。
+
+# ── F. 禁用：agent preset 机制（只在叠加 dsh-web-app 时存在这一行）─────
+#
+# `dsh-agent-presets` 由 `dsh-web-app` 插入，dsh-headless 没有这一行——
+# 对基于 headless 的 profile 这条禁用只会打一条 warning，无害。
+#
+# 三个自带 preset（minimal / standard / code）**每一个**都挂
+# `persistent-shell` 分组：`dsh-terminal`（PTY 注册表）+
+# `dsh-terminal-bash`（注入 `subprocess`）+ `dsh-tool-bash-persistent`。
+# iOS 上 `subprocess` 不存在（见本文件开头），所以这三个 preset 在这个
+# profile 里**没有一个能挂载成功**。
+#
+# 为什么必须在这里关掉，而不是靠上面 A 段那条 `- id: terminal-bash`：
+# 补丁作用于 profile 的插件树，preset 是独立的一份组合，patch 够不到它的
+# 行（见 A 段的订正）。preset 挂载失败会让 `session.create` 整个失败，
+# 而前端对这个失败**没有可见提示**——界面表现是"点了工作区，菜单收起来，
+# 什么都没发生"，极难从现象反推到原因。
+#
+# 关掉之后 web 界面用默认组合（也就是这份 profile 的插件树本身），
+# 上面所有禁用/替换都照常生效。代价是设置里的 preset 选择器没有可选项——
+# 在 iOS 上它本来也不该有：能选的三个都是坏的。
+#
+# 要恢复它，需要的是一个不含 shell 行的移动端 preset，而不是打开这一行。
+- id: agent-presets
+  disabled: true

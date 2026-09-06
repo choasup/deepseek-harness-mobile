@@ -98,3 +98,33 @@ describe.skipIf(!ready)('插入的行 id 不能与 dsh 自己的行冲突', () =
     expect(available.has('storage')).toBe(true)
   })
 })
+
+/**
+ * `mobile-app` 只是一个"带 YAML 补丁的 bundle"，不能把另外三个包声明成自己的
+ * 依赖——两个理由，第二个是硬的：
+ *
+ * 1. 补丁里的插件路径是 `./node_modules/@dsh-mobile/…`，由 loader 相对
+ *    **profile 的 baseUrl** 解析。装在 `mobile-app` 自己 node_modules 里的
+ *    嵌套副本永远不会被加载，纯属误导。
+ * 2. 这三个包在仓库里是 `workspace:*`。一旦这么写进 dependencies，用户在自己
+ *    的 profile 目录里跑 `pnpm install` 就会失败：
+ *    `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND: "@dsh-mobile/tool-fs-search@workspace:*"
+ *    is in the dependencies but no package named ... is present in the workspace`
+ *    ——profile 目录不是这个 workspace 的一部分。已经真的踩过一次。
+ *
+ * 依赖关系归 profile：README 的安装步骤要求四个包都列为 profile 的直接依赖。
+ */
+describe('mobile-app 不声明任何 @dsh-mobile 运行时依赖', () => {
+  it('package.json 里没有 dependencies 指向兄弟包', () => {
+    const pkgPath = fileURLToPath(new URL('../../package.json', import.meta.url))
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+      dependencies?: Record<string, string>
+    }
+    const siblings = Object.keys(pkg.dependencies ?? {}).filter((n) => n.startsWith('@dsh-mobile/'))
+    expect(
+      siblings,
+      `这些依赖会让用户 profile 里的 pnpm install 失败（workspace:* 在 profile 目录解析不到），\n` +
+        `而且嵌套副本根本不会被加载——补丁走的是 profile 的 node_modules：${siblings.join(', ')}`,
+    ).toEqual([])
+  })
+})

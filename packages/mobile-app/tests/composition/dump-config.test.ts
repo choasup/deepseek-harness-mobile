@@ -172,7 +172,11 @@ const DISABLED_AND_PRESENT = [
   'tool-fs-search',
   // 行 id 是 permission（包名是 permission-presets）。
   'permission','subprocess', 'bash-sandbox', 'pwsh-sandbox', 'tool-bash', 'tool-pwsh', 'sandbox']
-const ABSENT_NOT_DISABLED = ['terminal-bash', 'tmux-context']
+// `agent-presets` 同理，但理由不同：它由 dsh-web-app 插入，headless 组合里
+// 根本没有这一行。禁用它是因为三个自带 preset 都挂持久 shell，在 iOS 上
+// 一个都挂不上——而 preset 挂载失败会让 session.create 整个失败，前端不显示
+// 任何报错（表现为"点工作区没反应"）。详见 cordis.patch.yml 的 F 段。
+const ABSENT_NOT_DISABLED = ['terminal-bash', 'tmux-context', 'agent-presets']
 
 const MUST_STAY_ENABLED = [
   'tool-fs',
@@ -194,15 +198,15 @@ const OUR_ADDITIONS: Array<{ id: string; name: string }> = [
 ]
 
 describe.skipIf(!READY)('real dsh composes the mobile profile (Task 13, Step 2)', () => {
-  it('exits 0 and prints stderr containing only the two known "entry not found" patch warnings', () => {
+  it('exits 0 and prints only the known "entry not found" patch warnings', () => {
     const { status, stderr } = runDumpConfig()
     expect(status).toBe(0)
-    expect(stderr).toContain('[@dsh-mobile/mobile-app] patch: entry "terminal-bash" not found')
-    expect(stderr).toContain('[@dsh-mobile/mobile-app] patch: entry "tmux-context" not found')
-    // Nothing else on stderr — if a third warning shows up, that's new and
-    // worth looking at rather than silently accepting.
+    for (const id of ABSENT_NOT_DISABLED) {
+      expect(stderr).toContain(`[@dsh-mobile/mobile-app] patch: entry "${id}" not found`)
+    }
+    // 不多不少——多出来的第 N 条警告是新情况，值得看一眼，而不是默默接受。
     const lines = stderr.trim().split('\n').filter(Boolean)
-    expect(lines).toHaveLength(2)
+    expect(lines).toHaveLength(ABSENT_NOT_DISABLED.length)
   })
 
   it('marks the six local-process rows that do exist as disabled', () => {

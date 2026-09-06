@@ -22,16 +22,6 @@ importers:
         version: 3.2.7(@types/node@22.20.1)
 
   packages/mobile-app:
-    dependencies:
-      '@dsh-mobile/remote-registry':
-        specifier: workspace:*
-        version: link:../remote-registry
-      '@dsh-mobile/shell-ssh':
-        specifier: workspace:*
-        version: link:../shell-ssh
-      '@dsh-mobile/tool-fs-search':
-        specifier: workspace:*
-        version: link:../tool-fs-search
     devDependencies:
       '@types/js-yaml':
         specifier: ^4.0.9

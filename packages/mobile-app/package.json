@@ -13,11 +13,6 @@
       "patch": "./cordis.patch.yml"
     }
   },
-  "dependencies": {
-    "@dsh-mobile/remote-registry": "workspace:*",
-    "@dsh-mobile/shell-ssh": "workspace:*",
-    "@dsh-mobile/tool-fs-search": "workspace:*"
-  },
   "devDependencies": {
     "js-yaml": "^4.2.0",
     "@types/js-yaml": "^4.0.9"

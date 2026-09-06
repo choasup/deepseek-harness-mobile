@@ -83,6 +83,9 @@ const MUST_DISABLE = [
   'tool-pwsh',
   'tmux-context',
   'sandbox',
+  // 只在叠加 dsh-web-app 时存在。三个自带 preset 都挂持久 shell，
+  // 在 iOS 上一个都挂不上，而失败表现是"点工作区没反应"，没有可见报错。
+  'agent-presets',
 ]
 
 const MUST_STAY_ENABLED = [

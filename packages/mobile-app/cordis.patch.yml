@@ -146,15 +146,24 @@
 #
 # `name` 用**裸包名**，跟 dsh 自己的补丁写法一致。
 #
-# 订正：这里原先写着"必须用 profile 相对路径，因为 loader 对裸标识符的
-# import() 不使用 baseUrl"——**那是错的**，已实测证伪：四条全换成裸包名后
-# `dsh --profile mobile` 照常启动，`file:` 副本安装和 `link:` 软链安装都试过。
-# 失败时 loader 的报错原文是 `imported from /Users/<u>/.dsh/profiles/<name>/`，
-# 也就是说它本来就相对 profile 目录解析。当初那次 ERR_MODULE_NOT_FOUND 的真实
-# 原因是包还没被装成 profile 的直接依赖，被我错误地归纳成了 loader 的限制。
+# 裸包名能不能解析，**取决于跑 dsh 的 Node 版本**（2026-09-07 实测，
+# 同一个 dsh 安装、同一份 profile）：
 #
-# 真正的约束只有一条，而且是 pnpm 的：**四个包都要列为 profile 的直接依赖**，
-# 因为 pnpm 只把直接依赖提到 node_modules 顶层。这跟写路径还是写包名无关。
+#   Node 24.19  裸包名解析成功
+#   Node 20.20  失败：Cannot find package '@dsh-mobile/…' imported from
+#               .../cordis-plugin-loader/lib/index.js
+#
+# 这解释了此处注释的两次反复：最初记的"必须用 ./node_modules 相对路径"是在
+# Node 20 下观察到的（这台机器 Homebrew 的 dsh shebang 走 PATH 上的 node，
+# 默认就是 20），后来"证伪"是在 Node 24 下测的。两次观察都是真的，
+# 变量是 Node 版本，不是谁判断错了。
+#
+# 用裸包名是安全的：dsh 自己的 engines 是 `^22.19 || >=24`，Node 20 本来就
+# 不是支持的运行环境（在 20 上还会先撞 zstd / Promise.withResolvers /
+# stripTypeScriptTypes 三个硬失败）。
+#
+# 另一条约束与写法无关，但同样必需：**五个包都要列为 profile 的直接依赖**，
+# 因为 pnpm 只把直接依赖提到 node_modules 顶层。
 #
 # 另外注意 profile 的 `bundles` 走的是另一条解析路径
 # （`dsh-app-boot` 的 `resolveBundleDir`），报错长得不一样

@@ -114,3 +114,49 @@ note: expanded from macro 'fdopen'
 ### 1.5 构建结果
 
 *（进行中）*
+
+---
+
+## 检查点 3 的前置发现：真实的 Node 版本下限（不用等编译）
+
+在等 V8 编译时用 **Node 20.20.2 实跑 mobile profile**，把"到底哪些 API 挡路"
+测了出来。结论与计划里写的**不一样**：
+
+| 症状 | 所在包 | 最低 Node |
+|---|---|---|
+| `node:zlib` 不导出 `createZstdDecompress` | `dsh-session-persistence-jsonl` | **22.15** |
+| `Promise.withResolvers is not a function` | `dsh-agent-loop` | 22.0 |
+| `node:module` 不导出 `stripTypeScriptTypes` | `dsh-code-runtime-worker-thread` | 22.13 |
+
+三个都是**静态 import / 直接调用**，躲不掉。
+
+而计划里列的三项**都不是**阻塞项：
+
+- **`node:sqlite`** —— 只有 `dsh-session-query-sqlite` 用，且是函数体里的
+  `await import("node:sqlite")`（惰性）。`dsh-base` 出厂就配 `openAt: never`，
+  该包源码注释原话："a disabled deployment never imports"。所以它根本不会被
+  import。计划把它当成 22.5 下限的依据，是**只看了 grep 命中次数、没看引用形式**。
+- **`process.loadEnvFile`** —— 只有一个调用点，且包在 try/catch 里。Node 18 上
+  它是 `undefined`，抛的 TypeError 的 `.code` 不是 `ENOENT`，只打一行警告继续。
+- **`AbortSignal.any`** —— 19 处，但是个小静态方法，polyfill 约 15 行。
+
+**对计划的直接影响**：检查点 3 的退路里那条"退到 Node 22.5"**不可行**
+（zstd 要 22.15）。可退的最低点是 22.15，而 dsh 的 `engines` 是
+`^22.19 || >=24`，所以直接奔 22.19 最省事，没有更便宜的中间站。
+
+**方法上值得记一笔**：这个结论不用等交叉编译，在 Mac 上换个 Node 版本跑一次
+就出来了——`grep` 命中次数不能代替"实际跑一次"，惰性 import 和 try/catch
+包裹的调用在 grep 里跟硬依赖长得一模一样。
+
+## 附带发现：裸包名解析取决于 Node 版本
+
+同一个 dsh 安装、同一份 profile：
+
+```
+node v24.19.0  裸包名解析成功
+node v20.20.2  Cannot find package '@dsh-mobile/…' imported from
+               .../cordis-plugin-loader/lib/index.js
+```
+
+不影响正常使用（Node 20 本来就不满足 dsh 的 engines），但**排查时会误导**：
+同一份补丁 `nvm use 20` 报"包找不到"、切到 24 就好，很容易归因到装包上。

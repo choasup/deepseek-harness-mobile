@@ -26,15 +26,33 @@
 
 **1. 没有现成方案。** [nodejs-mobile](https://github.com/nodejs-mobile/nodejs-mobile) 社区 fork 仍在维护（2026-04 有更新），但停在 **Node 18.20.4**。
 
-**2. Node 18 不可用，无法降级绕过。** dsh 实测使用：
+**2. Node 18 不可用，无法降级绕过。**
 
-| API | 出现次数 | 最低 Node |
-|---|---|---|
-| `AbortSignal.any` | 32 | 20.3 |
-| `loadEnvFile` | 3 | 20.12 |
-| `node:sqlite` | 9 | **22.5** |
+> **2026-09-07 订正**：这一节原来的依据是错的。真正的下限不是 `node:sqlite`。
+> 用 Node 20.20.2 实跑 mobile profile，拿到的是三个**静态 import / 直接调用**
+> 的硬失败：
+>
+> | 症状 | 所在包 | 最低 Node |
+> |---|---|---|
+> | `node:zlib` 不导出 `createZstdDecompress` | `dsh-session-persistence-jsonl` | **22.15** |
+> | `Promise.withResolvers is not a function` | `dsh-agent-loop` | 22.0 |
+> | `node:module` 不导出 `stripTypeScriptTypes` | `dsh-code-runtime-worker-thread` | 22.13 |
+>
+> 而原来列的三项**都不是**阻塞项：
+> - `node:sqlite` —— 只有 `dsh-session-query-sqlite` 用，且是函数体里的
+>   `await import("node:sqlite")`（惰性）。`dsh-base` 出厂就配
+>   `openAt: never`，其源码注释原话："a disabled deployment never imports"。
+>   所以它**根本不会被 import**。
+> - `loadEnvFile` —— 只有一个调用点，且包在 try/catch 里；Node 18 上它是
+>   `undefined`，抛的 TypeError 的 `.code` 不是 ENOENT，只打一行警告然后继续。
+> - `AbortSignal.any` —— 19 处，但是个小静态方法，polyfill 约 15 行。
+>
+> **对本计划的直接影响**：检查点 3「卡住时的退路」里那条"退到 Node 22.5"
+> **不可行**——zstd 要 22.15。可退的最低点是 **22.15**，而 dsh 自己的
+> `engines` 写的是 `^22.19 || >=24`，所以直接奔 22.19 就是最省事的。
 
-`node:sqlite` 是内置模块，无法 polyfill。因此目标是 22.19+ 或 24。
+结论不变：目标是 22.19+ 或 24。但理由是 zstd / `Promise.withResolvers` /
+`stripTypeScriptTypes`，不是 `node:sqlite`。
 
 **3. jitless 是硬要求，且它关闭 WebAssembly。** 已在 Mac 上实测确认：
 

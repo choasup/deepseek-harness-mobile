@@ -100,12 +100,15 @@ pnpm 会说 `Ignored build scripts: cpu-features, ssh2`——**这是想要的�
 pnpm 只把**直接依赖**提到 `node_modules` 顶层，而补丁里的插件条目由 loader
 相对 profile 目录解析，找的就是顶层那一份。少列一个，那一行就 404。
 
-> 这里原先写着另一套理由：「补丁必须用 `./node_modules/…` 相对路径，因为
-> loader 对裸标识符的 `import()` 不使用 `baseUrl`」。**那是错的**，已实测证伪：
-> 全部换成裸包名后照常启动（`file:` 副本装和 `link:` 软链装都试过），而失败
-> 时 loader 的报错原文是 `imported from ~/.dsh/profiles/<name>/`——它本来就
-> 相对 profile 解析。当初那次 `ERR_MODULE_NOT_FOUND` 的真实原因就是这一条
-> 「没装成直接依赖」，被错误归纳成了 loader 的限制。
+> **补丁里用裸包名还是相对路径？** 裸包名可以，但**取决于 Node 版本**
+> （同一个 dsh 安装、同一份 profile 实测）：Node 24.19 解析成功，
+> Node 20.20 失败并报 `Cannot find package '@dsh-mobile/…' imported from
+> .../cordis-plugin-loader/lib/index.js`。
+>
+> 这不影响用法——dsh 的 `engines` 是 `^22.19 || >=24`，Node 20 本来就不是
+> 支持的运行环境（在 20 上还会先撞 zstd / `Promise.withResolvers` /
+> `stripTypeScriptTypes` 三个硬失败）。但**排查时会误导**：同一份补丁在
+> `nvm use 20` 下报"包找不到"，切到 24 就好了，很容易归因到装包上。
 
 **② 用 Node 22.19+ 或 24 跑 dsh。**
 

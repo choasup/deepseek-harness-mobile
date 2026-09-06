@@ -1,0 +1,973 @@
+diff --git a/tools/copy_libnode_headers.sh b/tools/copy_libnode_headers.sh
+new file mode 100755
+index 00000000..5bc5edab
+--- /dev/null
++++ b/tools/copy_libnode_headers.sh
+@@ -0,0 +1,82 @@
++#!/bin/bash
++
++set -e
++
++SCRIPT_DIR="$(dirname "$BASH_SOURCE")"
++
++if [ $# -ne 1 ]; then
++  echo "Requires either the string 'ios' or the string 'android' as argument"
++  exit 1
++fi
++
++if [ $1 == "ios" ]; then
++  OUT_DIR=out_ios
++elif [ $1 == "android" ]; then
++  OUT_DIR=out_android
++else
++  echo "Requires either the string 'ios' or the string 'android' as argument"
++  exit 1
++fi
++
++cd $SCRIPT_DIR
++cd ..
++
++HEADERS=$OUT_DIR/libnode/include/node
++mkdir -p $HEADERS
++
++# Gyp
++cp common.gypi $HEADERS/common.gypi
++cp config.gypi $HEADERS/config.gypi
++
++# openssl headers
++mkdir -p $HEADERS/openssl/archs
++cp deps/openssl/openssl/include/openssl/*.h $HEADERS/openssl/
++if [ $1 == "ios" ]; then
++  rsync -am --include='*.h' -f 'hide,! */' \
++    -f '- aix64*' \
++    -f '- BSD*' \
++    -f '- darwin-i386*' \
++    -f '- linux*' \
++    -f '- solaris*' \
++    -f '- VC-WIN*' \
++    deps/openssl/config/* $HEADERS/openssl
++elif [ $1 == "android" ]; then
++  rsync -am --include='*.h' -f 'hide,! */' \
++    -f '- aix64*' \
++    -f '- BSD*' \
++    -f '- darwin*' \
++    -f '- linux-armv4*' \
++    -f '- linux-ppc*' \
++    -f '- linux32-s390x*' \
++    -f '- linux64-loongarch*' \
++    -f '- linux64-mips64*' \
++    -f '- linux64-riscv64*' \
++    -f '- linux64-s390x*' \
++    -f '- solaris*' \
++    -f '- VC-WIN*' \
++    deps/openssl/config/* $HEADERS/openssl
++fi
++
++# node headers
++cp src/js_native_api.h $HEADERS/
++cp src/js_native_api_types.h $HEADERS/
++cp src/node_api_types.h $HEADERS/
++cp src/node_api.h $HEADERS/
++cp src/node_buffer.h $HEADERS/
++cp src/node_object_wrap.h $HEADERS/
++cp src/node_version.h $HEADERS/
++cp src/node.h $HEADERS/
++
++# uv headers
++rsync -am --include='*.h' -f 'hide,! */' deps/uv/include/ $HEADERS
++
++# v8 headers
++cp deps/v8/include/v8*.h $HEADERS/
++mkdir -p $HEADERS/libplatform
++cp deps/v8/include/libplatform/*.h $HEADERS/libplatform/
++mkdir -p $HEADERS/cppgc
++cp deps/v8/include/cppgc/*.h $HEADERS/cppgc/
++
++# zlib headers
++cp deps/zlib/zconf.h $HEADERS/zconf.h
++cp deps/zlib/zlib.h $HEADERS/zlib.h
+diff --git a/tools/ios-framework/NodeMobile.xcodeproj/project.pbxproj b/tools/ios-framework/NodeMobile.xcodeproj/project.pbxproj
+new file mode 100644
+index 00000000..400da5d1
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile.xcodeproj/project.pbxproj
+@@ -0,0 +1,484 @@
++// !$*UTF8*$!
++{
++	archiveVersion = 1;
++	classes = {
++	};
++	objectVersion = 46;
++	objects = {
++
++/* Begin PBXBuildFile section */
++		33300EB6240437620019E302 /* libhistogram.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EAB240437620019E302 /* libhistogram.a */; };
++		33300EB7240437620019E302 /* libllhttp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EAC240437620019E302 /* libllhttp.a */; };
++		33300EB8240437620019E302 /* libv8_initializers.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EAD240437620019E302 /* libv8_initializers.a */; };
++		33300EB9240437620019E302 /* libv8_libplatform.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EAE240437620019E302 /* libv8_libplatform.a */; };
++		33300EBA240437620019E302 /* libbrotli.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EAF240437620019E302 /* libbrotli.a */; };
++		33300EBB240437620019E302 /* libuvwasi.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EB0240437620019E302 /* libuvwasi.a */; };
++		33300EBC240437620019E302 /* libv8_libbase.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EB1240437620019E302 /* libv8_libbase.a */; };
++		33300EBE240437620019E302 /* libv8_base_without_compiler.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EB3240437620019E302 /* libv8_base_without_compiler.a */; };
++		33300EC2240437AB0019E302 /* libv8_compiler.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EC0240437AB0019E302 /* libv8_compiler.a */; };
++		33300EC3240437AB0019E302 /* libv8_snapshot.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 33300EC1240437AB0019E302 /* libv8_snapshot.a */; };
++		3C02AFD41FA919C30053C191 /* NodeMobile.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3C02AFD31FA919C30053C191 /* NodeMobile.cpp */; };
++		D9A7619D1F7C63A8006AFE86 /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 331917C21EC4702A00F93D52 /* CoreFoundation.framework */; };
++		D9A7619E1F7C63A8006AFE86 /* libcares.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3376C9191EC3922F0007AD59 /* libcares.a */; };
++		D9A761A21F7C63A8006AFE86 /* libnghttp2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 334822141F6AFBD200CF403E /* libnghttp2.a */; };
++		D9A761A31F7C63A8006AFE86 /* libnode.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3376C91D1EC3922F0007AD59 /* libnode.a */; };
++		D9A761A41F7C63A8006AFE86 /* libopenssl.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3376C91E1EC3922F0007AD59 /* libopenssl.a */; };
++		D9A761A51F7C63A8006AFE86 /* libuv.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3376C91F1EC3922F0007AD59 /* libuv.a */; };
++		D9A761A61F7C63A8006AFE86 /* libzlib.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 3376C9201EC3922F0007AD59 /* libzlib.a */; };
++		D9A762281F7C675E006097B1 /* NodeMobile.h in Headers */ = {isa = PBXBuildFile; fileRef = D9A762261F7C674F006097B1 /* NodeMobile.h */; settings = {ATTRIBUTES = (Public, ); }; };
++		F63BCE7B29756D9B0049F595 /* libnghttp3.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F63BCE7A29756D920049F595 /* libnghttp3.a */; };
++		F63BCE7D29756DAC0049F595 /* libngtcp2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F63BCE7C29756DAA0049F595 /* libngtcp2.a */; };
++		F63BCE7F29756DCF0049F595 /* libv8_zlib.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F63BCE7E29756DCD0049F595 /* libv8_zlib.a */; };
++		F6860EE12ACD491900070ED3 /* libada.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6860EE02ACD491900070ED3 /* libada.a */; };
++		F6860EE32ACD492E00070ED3 /* libbase64_neon64.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6860EE22ACD492E00070ED3 /* libbase64_neon64.a */; };
++		F6860EE52ACD493400070ED3 /* libbase64.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6860EE42ACD493400070ED3 /* libbase64.a */; };
++		F6860EE72ACD493C00070ED3 /* libsimdutf.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6860EE62ACD493C00070ED3 /* libsimdutf.a */; };
++		F6860EE92ACD494B00070ED3 /* libzlib_inflate_chunk_simd.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6860EE82ACD494B00070ED3 /* libzlib_inflate_chunk_simd.a */; };
++		F6D008C32AD14FAE00FB3D3D /* libbase64_sse41.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6D008BD2AD14FAD00FB3D3D /* libbase64_sse41.a */; };
++		F6D008C42AD14FAE00FB3D3D /* libbase64_avx.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6D008BE2AD14FAD00FB3D3D /* libbase64_avx.a */; };
++		F6D008C52AD14FAE00FB3D3D /* libbase64_ssse3.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6D008BF2AD14FAD00FB3D3D /* libbase64_ssse3.a */; };
++		F6D008C62AD14FAE00FB3D3D /* libbase64_sse42.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6D008C02AD14FAD00FB3D3D /* libbase64_sse42.a */; };
++		F6D008C72AD14FAE00FB3D3D /* libbase64_avx2.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F6D008C12AD14FAD00FB3D3D /* libbase64_avx2.a */; };
++/* End PBXBuildFile section */
++
++/* Begin PBXFileReference section */
++		331917C21EC4702A00F93D52 /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = System/Library/Frameworks/CoreFoundation.framework; sourceTree = SDKROOT; };
++		33300EAB240437620019E302 /* libhistogram.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libhistogram.a; path = bin/libhistogram.a; sourceTree = "<group>"; };
++		33300EAC240437620019E302 /* libllhttp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libllhttp.a; path = bin/libllhttp.a; sourceTree = "<group>"; };
++		33300EAD240437620019E302 /* libv8_initializers.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_initializers.a; path = bin/libv8_initializers.a; sourceTree = "<group>"; };
++		33300EAE240437620019E302 /* libv8_libplatform.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_libplatform.a; path = bin/libv8_libplatform.a; sourceTree = "<group>"; };
++		33300EAF240437620019E302 /* libbrotli.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbrotli.a; path = bin/libbrotli.a; sourceTree = "<group>"; };
++		33300EB0240437620019E302 /* libuvwasi.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libuvwasi.a; path = bin/libuvwasi.a; sourceTree = "<group>"; };
++		33300EB1240437620019E302 /* libv8_libbase.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_libbase.a; path = bin/libv8_libbase.a; sourceTree = "<group>"; };
++		33300EB3240437620019E302 /* libv8_base_without_compiler.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_base_without_compiler.a; path = bin/libv8_base_without_compiler.a; sourceTree = "<group>"; };
++		33300EC0240437AB0019E302 /* libv8_compiler.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_compiler.a; path = bin/libv8_compiler.a; sourceTree = "<group>"; };
++		33300EC1240437AB0019E302 /* libv8_snapshot.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_snapshot.a; path = bin/libv8_snapshot.a; sourceTree = "<group>"; };
++		334822141F6AFBD200CF403E /* libnghttp2.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libnghttp2.a; path = bin/libnghttp2.a; sourceTree = "<group>"; };
++		3376C9191EC3922F0007AD59 /* libcares.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libcares.a; path = bin/libcares.a; sourceTree = "<group>"; };
++		3376C91D1EC3922F0007AD59 /* libnode.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libnode.a; path = bin/libnode.a; sourceTree = "<group>"; };
++		3376C91E1EC3922F0007AD59 /* libopenssl.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libopenssl.a; path = bin/libopenssl.a; sourceTree = "<group>"; };
++		3376C91F1EC3922F0007AD59 /* libuv.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libuv.a; path = bin/libuv.a; sourceTree = "<group>"; };
++		3376C9201EC3922F0007AD59 /* libzlib.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libzlib.a; path = bin/libzlib.a; sourceTree = "<group>"; };
++		3C02AFD31FA919C30053C191 /* NodeMobile.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = NodeMobile.cpp; sourceTree = "<group>"; };
++		D9A761AE1F7C63A8006AFE86 /* NodeMobile.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = NodeMobile.framework; sourceTree = BUILT_PRODUCTS_DIR; };
++		D9A762251F7C674F006097B1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
++		D9A762261F7C674F006097B1 /* NodeMobile.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = NodeMobile.h; sourceTree = "<group>"; };
++		F63BCE7A29756D920049F595 /* libnghttp3.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libnghttp3.a; path = bin/libnghttp3.a; sourceTree = "<group>"; };
++		F63BCE7C29756DAA0049F595 /* libngtcp2.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libngtcp2.a; path = bin/libngtcp2.a; sourceTree = "<group>"; };
++		F63BCE7E29756DCD0049F595 /* libv8_zlib.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libv8_zlib.a; path = bin/libv8_zlib.a; sourceTree = "<group>"; };
++		F6860EE02ACD491900070ED3 /* libada.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libada.a; path = bin/libada.a; sourceTree = "<group>"; };
++		F6860EE22ACD492E00070ED3 /* libbase64_neon64.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64_neon64.a; path = bin/libbase64_neon64.a; sourceTree = "<group>"; };
++		F6860EE42ACD493400070ED3 /* libbase64.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64.a; path = bin/libbase64.a; sourceTree = "<group>"; };
++		F6860EE62ACD493C00070ED3 /* libsimdutf.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libsimdutf.a; path = bin/libsimdutf.a; sourceTree = "<group>"; };
++		F6860EE82ACD494B00070ED3 /* libzlib_inflate_chunk_simd.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libzlib_inflate_chunk_simd.a; path = bin/libzlib_inflate_chunk_simd.a; sourceTree = "<group>"; };
++		F6D008BD2AD14FAD00FB3D3D /* libbase64_sse41.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64_sse41.a; path = bin/libbase64_sse41.a; sourceTree = "<group>"; };
++		F6D008BE2AD14FAD00FB3D3D /* libbase64_avx.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64_avx.a; path = bin/libbase64_avx.a; sourceTree = "<group>"; };
++		F6D008BF2AD14FAD00FB3D3D /* libbase64_ssse3.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64_ssse3.a; path = bin/libbase64_ssse3.a; sourceTree = "<group>"; };
++		F6D008C02AD14FAD00FB3D3D /* libbase64_sse42.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64_sse42.a; path = bin/libbase64_sse42.a; sourceTree = "<group>"; };
++		F6D008C12AD14FAD00FB3D3D /* libbase64_avx2.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libbase64_avx2.a; path = bin/libbase64_avx2.a; sourceTree = "<group>"; };
++/* End PBXFileReference section */
++
++/* Begin PBXFrameworksBuildPhase section */
++		D9A7619C1F7C63A8006AFE86 /* Frameworks */ = {
++			isa = PBXFrameworksBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				F6D008C62AD14FAE00FB3D3D /* libbase64_sse42.a in Frameworks */,
++				F6D008C42AD14FAE00FB3D3D /* libbase64_avx.a in Frameworks */,
++				33300EC2240437AB0019E302 /* libv8_compiler.a in Frameworks */,
++				33300EC3240437AB0019E302 /* libv8_snapshot.a in Frameworks */,
++				F63BCE7D29756DAC0049F595 /* libngtcp2.a in Frameworks */,
++				33300EB6240437620019E302 /* libhistogram.a in Frameworks */,
++				F6D008C52AD14FAE00FB3D3D /* libbase64_ssse3.a in Frameworks */,
++				33300EB7240437620019E302 /* libllhttp.a in Frameworks */,
++				33300EB8240437620019E302 /* libv8_initializers.a in Frameworks */,
++				33300EB9240437620019E302 /* libv8_libplatform.a in Frameworks */,
++				33300EBA240437620019E302 /* libbrotli.a in Frameworks */,
++				33300EBB240437620019E302 /* libuvwasi.a in Frameworks */,
++				F63BCE7F29756DCF0049F595 /* libv8_zlib.a in Frameworks */,
++				33300EBC240437620019E302 /* libv8_libbase.a in Frameworks */,
++				33300EBE240437620019E302 /* libv8_base_without_compiler.a in Frameworks */,
++				F63BCE7B29756D9B0049F595 /* libnghttp3.a in Frameworks */,
++				D9A7619D1F7C63A8006AFE86 /* CoreFoundation.framework in Frameworks */,
++				F6860EE72ACD493C00070ED3 /* libsimdutf.a in Frameworks */,
++				D9A7619E1F7C63A8006AFE86 /* libcares.a in Frameworks */,
++				D9A761A21F7C63A8006AFE86 /* libnghttp2.a in Frameworks */,
++				F6860EE32ACD492E00070ED3 /* libbase64_neon64.a in Frameworks */,
++				F6860EE12ACD491900070ED3 /* libada.a in Frameworks */,
++				D9A761A31F7C63A8006AFE86 /* libnode.a in Frameworks */,
++				F6D008C32AD14FAE00FB3D3D /* libbase64_sse41.a in Frameworks */,
++				D9A761A41F7C63A8006AFE86 /* libopenssl.a in Frameworks */,
++				F6860EE52ACD493400070ED3 /* libbase64.a in Frameworks */,
++				F6D008C72AD14FAE00FB3D3D /* libbase64_avx2.a in Frameworks */,
++				D9A761A51F7C63A8006AFE86 /* libuv.a in Frameworks */,
++				F6860EE92ACD494B00070ED3 /* libzlib_inflate_chunk_simd.a in Frameworks */,
++				D9A761A61F7C63A8006AFE86 /* libzlib.a in Frameworks */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
++/* End PBXFrameworksBuildPhase section */
++
++/* Begin PBXGroup section */
++		3376C9031EC391130007AD59 = {
++			isa = PBXGroup;
++			children = (
++				D9A762241F7C674F006097B1 /* NodeMobile */,
++				3376C90E1EC391130007AD59 /* Products */,
++				3376C9181EC3922E0007AD59 /* Frameworks */,
++			);
++			sourceTree = "<group>";
++		};
++		3376C90E1EC391130007AD59 /* Products */ = {
++			isa = PBXGroup;
++			children = (
++				D9A761AE1F7C63A8006AFE86 /* NodeMobile.framework */,
++			);
++			name = Products;
++			sourceTree = "<group>";
++		};
++		3376C9181EC3922E0007AD59 /* Frameworks */ = {
++			isa = PBXGroup;
++			children = (
++				F6860EE02ACD491900070ED3 /* libada.a */,
++				F6D008BE2AD14FAD00FB3D3D /* libbase64_avx.a */,
++				F6D008C12AD14FAD00FB3D3D /* libbase64_avx2.a */,
++				F6860EE22ACD492E00070ED3 /* libbase64_neon64.a */,
++				F6D008BD2AD14FAD00FB3D3D /* libbase64_sse41.a */,
++				F6D008C02AD14FAD00FB3D3D /* libbase64_sse42.a */,
++				F6D008BF2AD14FAD00FB3D3D /* libbase64_ssse3.a */,
++				F6860EE42ACD493400070ED3 /* libbase64.a */,
++				33300EAF240437620019E302 /* libbrotli.a */,
++				3376C9191EC3922F0007AD59 /* libcares.a */,
++				33300EAB240437620019E302 /* libhistogram.a */,
++				33300EAC240437620019E302 /* libllhttp.a */,
++				334822141F6AFBD200CF403E /* libnghttp2.a */,
++				F63BCE7A29756D920049F595 /* libnghttp3.a */,
++				F63BCE7C29756DAA0049F595 /* libngtcp2.a */,
++				3376C91D1EC3922F0007AD59 /* libnode.a */,
++				3376C91E1EC3922F0007AD59 /* libopenssl.a */,
++				F6860EE62ACD493C00070ED3 /* libsimdutf.a */,
++				3376C91F1EC3922F0007AD59 /* libuv.a */,
++				33300EB0240437620019E302 /* libuvwasi.a */,
++				33300EB3240437620019E302 /* libv8_base_without_compiler.a */,
++				33300EC0240437AB0019E302 /* libv8_compiler.a */,
++				33300EAD240437620019E302 /* libv8_initializers.a */,
++				33300EB1240437620019E302 /* libv8_libbase.a */,
++				33300EAE240437620019E302 /* libv8_libplatform.a */,
++				33300EC1240437AB0019E302 /* libv8_snapshot.a */,
++				F63BCE7E29756DCD0049F595 /* libv8_zlib.a */,
++				F6860EE82ACD494B00070ED3 /* libzlib_inflate_chunk_simd.a */,
++				3376C9201EC3922F0007AD59 /* libzlib.a */,
++				331917C21EC4702A00F93D52 /* CoreFoundation.framework */,
++			);
++			name = Frameworks;
++			sourceTree = "<group>";
++		};
++		D9A762241F7C674F006097B1 /* NodeMobile */ = {
++			isa = PBXGroup;
++			children = (
++				D9A762251F7C674F006097B1 /* Info.plist */,
++				D9A762261F7C674F006097B1 /* NodeMobile.h */,
++				3C02AFD31FA919C30053C191 /* NodeMobile.cpp */,
++			);
++			path = NodeMobile;
++			sourceTree = "<group>";
++		};
++/* End PBXGroup section */
++
++/* Begin PBXHeadersBuildPhase section */
++		D9A761A71F7C63A8006AFE86 /* Headers */ = {
++			isa = PBXHeadersBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				D9A762281F7C675E006097B1 /* NodeMobile.h in Headers */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
++/* End PBXHeadersBuildPhase section */
++
++/* Begin PBXNativeTarget section */
++		D9A7619A1F7C63A8006AFE86 /* NodeMobile */ = {
++			isa = PBXNativeTarget;
++			buildConfigurationList = D9A761AB1F7C63A8006AFE86 /* Build configuration list for PBXNativeTarget "NodeMobile" */;
++			buildPhases = (
++				D9A7619B1F7C63A8006AFE86 /* Sources */,
++				D9A7619C1F7C63A8006AFE86 /* Frameworks */,
++				D9A761A71F7C63A8006AFE86 /* Headers */,
++				D9A761AA1F7C63A8006AFE86 /* Resources */,
++			);
++			buildRules = (
++			);
++			dependencies = (
++			);
++			name = NodeMobile;
++			productName = nodeLib;
++			productReference = D9A761AE1F7C63A8006AFE86 /* NodeMobile.framework */;
++			productType = "com.apple.product-type.framework";
++		};
++/* End PBXNativeTarget section */
++
++/* Begin PBXProject section */
++		3376C9041EC391130007AD59 /* Project object */ = {
++			isa = PBXProject;
++			attributes = {
++				LastUpgradeCheck = 0900;
++				ORGANIZATIONNAME = "Janea Systems";
++				TargetAttributes = {
++					D9A7619A1F7C63A8006AFE86 = {
++						ProvisioningStyle = Automatic;
++					};
++				};
++			};
++			buildConfigurationList = 3376C9071EC391130007AD59 /* Build configuration list for PBXProject "NodeMobile" */;
++			compatibilityVersion = "Xcode 3.2";
++			developmentRegion = English;
++			hasScannedForEncodings = 0;
++			knownRegions = (
++				English,
++				en,
++			);
++			mainGroup = 3376C9031EC391130007AD59;
++			productRefGroup = 3376C90E1EC391130007AD59 /* Products */;
++			projectDirPath = "";
++			projectRoot = "";
++			targets = (
++				D9A7619A1F7C63A8006AFE86 /* NodeMobile */,
++			);
++		};
++/* End PBXProject section */
++
++/* Begin PBXResourcesBuildPhase section */
++		D9A761AA1F7C63A8006AFE86 /* Resources */ = {
++			isa = PBXResourcesBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
++/* End PBXResourcesBuildPhase section */
++
++/* Begin PBXSourcesBuildPhase section */
++		D9A7619B1F7C63A8006AFE86 /* Sources */ = {
++			isa = PBXSourcesBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				3C02AFD41FA919C30053C191 /* NodeMobile.cpp in Sources */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
++/* End PBXSourcesBuildPhase section */
++
++/* Begin XCBuildConfiguration section */
++		3376C9131EC391130007AD59 /* Debug */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				ALWAYS_SEARCH_USER_PATHS = NO;
++				CLANG_ANALYZER_NONNULL = YES;
++				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
++				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
++				CLANG_CXX_LIBRARY = "libc++";
++				CLANG_ENABLE_MODULES = YES;
++				CLANG_ENABLE_OBJC_ARC = YES;
++				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
++				CLANG_WARN_BOOL_CONVERSION = YES;
++				CLANG_WARN_COMMA = YES;
++				CLANG_WARN_CONSTANT_CONVERSION = YES;
++				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
++				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
++				CLANG_WARN_EMPTY_BODY = YES;
++				CLANG_WARN_ENUM_CONVERSION = YES;
++				CLANG_WARN_INFINITE_RECURSION = YES;
++				CLANG_WARN_INT_CONVERSION = YES;
++				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
++				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
++				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
++				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
++				CLANG_WARN_STRICT_PROTOTYPES = YES;
++				CLANG_WARN_SUSPICIOUS_MOVE = YES;
++				CLANG_WARN_UNREACHABLE_CODE = YES;
++				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
++				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
++				COPY_PHASE_STRIP = NO;
++				CURRENT_PROJECT_VERSION = 1;
++				DEBUG_INFORMATION_FORMAT = dwarf;
++				ENABLE_STRICT_OBJC_MSGSEND = YES;
++				ENABLE_TESTABILITY = YES;
++				GCC_C_LANGUAGE_STANDARD = gnu99;
++				GCC_DYNAMIC_NO_PIC = NO;
++				GCC_NO_COMMON_BLOCKS = YES;
++				GCC_OPTIMIZATION_LEVEL = 0;
++				GCC_PREPROCESSOR_DEFINITIONS = (
++					"DEBUG=1",
++					"$(inherited)",
++				);
++				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
++				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
++				GCC_WARN_UNDECLARED_SELECTOR = YES;
++				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
++				GCC_WARN_UNUSED_FUNCTION = YES;
++				GCC_WARN_UNUSED_VARIABLE = YES;
++				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
++				MTL_ENABLE_DEBUG_INFO = YES;
++				ONLY_ACTIVE_ARCH = YES;
++				SDKROOT = iphoneos;
++				TARGETED_DEVICE_FAMILY = "1,2";
++				VALID_ARCHS = arm64;
++				VERSIONING_SYSTEM = "apple-generic";
++				VERSION_INFO_PREFIX = "";
++			};
++			name = Debug;
++		};
++		3376C9141EC391130007AD59 /* Release */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				ALWAYS_SEARCH_USER_PATHS = NO;
++				CLANG_ANALYZER_NONNULL = YES;
++				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
++				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
++				CLANG_CXX_LIBRARY = "libc++";
++				CLANG_ENABLE_MODULES = YES;
++				CLANG_ENABLE_OBJC_ARC = YES;
++				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
++				CLANG_WARN_BOOL_CONVERSION = YES;
++				CLANG_WARN_COMMA = YES;
++				CLANG_WARN_CONSTANT_CONVERSION = YES;
++				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
++				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
++				CLANG_WARN_EMPTY_BODY = YES;
++				CLANG_WARN_ENUM_CONVERSION = YES;
++				CLANG_WARN_INFINITE_RECURSION = YES;
++				CLANG_WARN_INT_CONVERSION = YES;
++				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
++				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
++				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
++				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
++				CLANG_WARN_STRICT_PROTOTYPES = YES;
++				CLANG_WARN_SUSPICIOUS_MOVE = YES;
++				CLANG_WARN_UNREACHABLE_CODE = YES;
++				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
++				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
++				COPY_PHASE_STRIP = NO;
++				CURRENT_PROJECT_VERSION = 1;
++				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
++				ENABLE_NS_ASSERTIONS = NO;
++				ENABLE_STRICT_OBJC_MSGSEND = YES;
++				GCC_C_LANGUAGE_STANDARD = gnu99;
++				GCC_NO_COMMON_BLOCKS = YES;
++				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
++				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
++				GCC_WARN_UNDECLARED_SELECTOR = YES;
++				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
++				GCC_WARN_UNUSED_FUNCTION = YES;
++				GCC_WARN_UNUSED_VARIABLE = YES;
++				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
++				MTL_ENABLE_DEBUG_INFO = NO;
++				SDKROOT = iphoneos;
++				TARGETED_DEVICE_FAMILY = "1,2";
++				VALIDATE_PRODUCT = YES;
++				VALID_ARCHS = arm64;
++				VERSIONING_SYSTEM = "apple-generic";
++				VERSION_INFO_PREFIX = "";
++			};
++			name = Release;
++		};
++		D9A761AC1F7C63A8006AFE86 /* Debug */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				APPLICATION_EXTENSION_API_ONLY = YES;
++				CODE_SIGN_IDENTITY = "";
++				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";
++				CODE_SIGN_STYLE = Automatic;
++				COPY_PHASE_STRIP = YES;
++				DEFINES_MODULE = YES;
++				DEVELOPMENT_TEAM = "";
++				DYLIB_COMPATIBILITY_VERSION = 1;
++				DYLIB_CURRENT_VERSION = 1;
++				DYLIB_INSTALL_NAME_BASE = "@rpath";
++				ENABLE_BITCODE = NO;
++				INFOPLIST_FILE = NodeMobile/Info.plist;
++				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
++				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
++				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
++				LIBRARY_SEARCH_PATHS = (
++					"$(inherited)",
++					"$(PROJECT_DIR)/bin",
++				);
++				ONLY_ACTIVE_ARCH = NO;
++				OTHER_LDFLAGS = (
++					"-all_load",
++					"-v",
++					"-lstdc++",
++				);
++				PRODUCT_BUNDLE_IDENTIFIER = com.janeasystems.NodeMobile;
++				PRODUCT_NAME = "$(TARGET_NAME)";
++				PROVISIONING_PROFILE_SPECIFIER = "";
++				SEPARATE_STRIP = YES;
++				SKIP_INSTALL = YES;
++				STRIP_STYLE = "non-global";
++				VALID_ARCHS = "arm64 x86_64";
++			};
++			name = Debug;
++		};
++		D9A761AD1F7C63A8006AFE86 /* Release */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				APPLICATION_EXTENSION_API_ONLY = YES;
++				CODE_SIGN_IDENTITY = "";
++				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";
++				CODE_SIGN_STYLE = Automatic;
++				COPY_PHASE_STRIP = YES;
++				DEFINES_MODULE = YES;
++				DEVELOPMENT_TEAM = "";
++				DYLIB_COMPATIBILITY_VERSION = 1;
++				DYLIB_CURRENT_VERSION = 1;
++				DYLIB_INSTALL_NAME_BASE = "@rpath";
++				ENABLE_BITCODE = NO;
++				INFOPLIST_FILE = NodeMobile/Info.plist;
++				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
++				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
++				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
++				LIBRARY_SEARCH_PATHS = (
++					"$(inherited)",
++					"$(PROJECT_DIR)/bin",
++				);
++				ONLY_ACTIVE_ARCH = NO;
++				OTHER_LDFLAGS = (
++					"-all_load",
++					"-v",
++					"-lstdc++",
++				);
++				PRODUCT_BUNDLE_IDENTIFIER = com.janeasystems.NodeMobile;
++				PRODUCT_NAME = "$(TARGET_NAME)";
++				PROVISIONING_PROFILE_SPECIFIER = "";
++				SEPARATE_STRIP = YES;
++				SKIP_INSTALL = YES;
++				STRIP_STYLE = "non-global";
++				VALID_ARCHS = "arm64 x86_64";
++			};
++			name = Release;
++		};
++/* End XCBuildConfiguration section */
++
++/* Begin XCConfigurationList section */
++		3376C9071EC391130007AD59 /* Build configuration list for PBXProject "NodeMobile" */ = {
++			isa = XCConfigurationList;
++			buildConfigurations = (
++				3376C9131EC391130007AD59 /* Debug */,
++				3376C9141EC391130007AD59 /* Release */,
++			);
++			defaultConfigurationIsVisible = 0;
++			defaultConfigurationName = Release;
++		};
++		D9A761AB1F7C63A8006AFE86 /* Build configuration list for PBXNativeTarget "NodeMobile" */ = {
++			isa = XCConfigurationList;
++			buildConfigurations = (
++				D9A761AC1F7C63A8006AFE86 /* Debug */,
++				D9A761AD1F7C63A8006AFE86 /* Release */,
++			);
++			defaultConfigurationIsVisible = 0;
++			defaultConfigurationName = Release;
++		};
++/* End XCConfigurationList section */
++	};
++	rootObject = 3376C9041EC391130007AD59 /* Project object */;
++}
+diff --git a/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/contents.xcworkspacedata b/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+new file mode 100644
+index 00000000..919434a6
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<Workspace
++   version = "1.0">
++   <FileRef
++      location = "self:">
++   </FileRef>
++</Workspace>
+diff --git a/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist b/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+new file mode 100644
+index 00000000..18d98100
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>IDEDidComputeMac32BitWarning</key>
++	<true/>
++</dict>
++</plist>
+diff --git a/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/xcuserdata/jbernardo.xcuserdatad/UserInterfaceState.xcuserstate b/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/xcuserdata/jbernardo.xcuserdatad/UserInterfaceState.xcuserstate
+new file mode 100644
+index 00000000..8d40be3e
+Binary files /dev/null and b/tools/ios-framework/NodeMobile.xcodeproj/project.xcworkspace/xcuserdata/jbernardo.xcuserdatad/UserInterfaceState.xcuserstate differ
+diff --git a/tools/ios-framework/NodeMobile.xcodeproj/xcuserdata/jbernardo.xcuserdatad/xcschemes/xcschememanagement.plist b/tools/ios-framework/NodeMobile.xcodeproj/xcuserdata/jbernardo.xcuserdatad/xcschemes/xcschememanagement.plist
+new file mode 100644
+index 00000000..5fedcce0
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile.xcodeproj/xcuserdata/jbernardo.xcuserdatad/xcschemes/xcschememanagement.plist
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>SchemeUserState</key>
++	<dict>
++		<key>NodeMobile.xcscheme_^#shared#^_</key>
++		<dict>
++			<key>orderHint</key>
++			<integer>0</integer>
++		</dict>
++	</dict>
++</dict>
++</plist>
+diff --git a/tools/ios-framework/NodeMobile/Info.plist b/tools/ios-framework/NodeMobile/Info.plist
+new file mode 100644
+index 00000000..cda5ebba
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile/Info.plist
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>CFBundleDevelopmentRegion</key>
++	<string>en</string>
++	<key>CFBundleExecutable</key>
++	<string>$(EXECUTABLE_NAME)</string>
++	<key>CFBundleIdentifier</key>
++	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
++	<key>CFBundleInfoDictionaryVersion</key>
++	<string>6.0</string>
++	<key>CFBundleName</key>
++	<string>$(PRODUCT_NAME)</string>
++	<key>CFBundlePackageType</key>
++	<string>FMWK</string>
++	<key>CFBundleShortVersionString</key>
++	<string>1.0</string>
++	<key>CFBundleVersion</key>
++	<string>$(CURRENT_PROJECT_VERSION)</string>
++	<key>NSPrincipalClass</key>
++	<string></string>
++	<key>UIRequiredDeviceCapabilities</key>
++	<array>
++		<string>arm64</string>
++	</array>
++	<key>NSHumanReadableCopyright</key>
++	<string>Copyright Node.js contributors.
++Modifications copyright (c) Janea Systems, Inc. 
++MIT license.</string>
++</dict>
++</plist>
+diff --git a/tools/ios-framework/NodeMobile/NodeMobile.cpp b/tools/ios-framework/NodeMobile/NodeMobile.cpp
+new file mode 100644
+index 00000000..48f6e233
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile/NodeMobile.cpp
+@@ -0,0 +1,10 @@
++
++#import "NodeMobile.h"
++
++namespace node {
++    int Start(int argc, char *argv[]);
++} // namespace node
++
++int node_start(int argc, char *argv[]) {
++    return node::Start(argc, argv);
++}
+diff --git a/tools/ios-framework/NodeMobile/NodeMobile.h b/tools/ios-framework/NodeMobile/NodeMobile.h
+new file mode 100644
+index 00000000..ee8b9679
+--- /dev/null
++++ b/tools/ios-framework/NodeMobile/NodeMobile.h
+@@ -0,0 +1,10 @@
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++    
++int node_start(int argc, char *argv[]);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/tools/ios_framework_prepare.sh b/tools/ios_framework_prepare.sh
+new file mode 100755
+index 00000000..98858660
+--- /dev/null
++++ b/tools/ios_framework_prepare.sh
+@@ -0,0 +1,268 @@
++#!/bin/bash
++
++set -e
++
++ROOT=${PWD}
++
++SCRIPT_DIR="$(dirname "$BASH_SOURCE")"
++cd "$SCRIPT_DIR"
++SCRIPT_DIR=${PWD}
++
++#should be the node's source root
++cd ../
++
++LIBRARY_PATH='out/Release'
++TARGET_LIBRARY_PATH='tools/ios-framework/bin'
++NODELIB_PROJECT_PATH='tools/ios-framework'
++XCODE_PROJECT_PATH='tools/ios-framework/NodeMobile.xcodeproj/project.pbxproj'
++
++declare -a outputs_common=(
++    "libada.a"
++    "libbase64.a"
++    "libbrotli.a"
++    "libcares.a"
++    "libgtest_main.a"
++    "libgtest.a"
++    "libhistogram.a"
++    "libllhttp.a"
++    "libnghttp2.a"
++    "libnghttp3.a"
++    "libngtcp2.a"
++    "libnode.a"
++    "libopenssl.a"
++    "libsimdutf.a"
++    "libuv.a"
++    "libuvwasi.a"
++    "libv8_base_without_compiler.a"
++    "libv8_compiler.a"
++    "libv8_initializers.a"
++    "libv8_libbase.a"
++    "libv8_libplatform.a"
++    "libv8_snapshot.a"
++    "libv8_zlib.a"
++    "libzlib.a"
++)
++declare -a outputs_x64_only=(
++    "libbase64_avx.a"
++    "libbase64_avx2.a"
++    "libbase64_sse41.a"
++    "libbase64_sse42.a"
++    "libbase64_ssse3.a"
++)
++declare -a outputs_arm64_only=(
++    "libbase64_neon64.a"
++    "libzlib_inflate_chunk_simd.a"
++)
++
++declare -a outputs_x64=("${outputs_common[@]}" "${outputs_x64_only[@]}")
++declare -a outputs_arm64=("${outputs_common[@]}" "${outputs_arm64_only[@]}")
++
++build_for_arm64_device() {
++  make clean
++  GYP_DEFINES="target_arch=arm64 host_os=mac target_os=ios"
++  export GYP_DEFINES
++  ./configure \
++    --dest-os=ios \
++    --dest-cpu=arm64 \
++    --with-intl=none \
++    --cross-compiling \
++    --enable-static \
++    --openssl-no-asm \
++    --v8-options=--jitless \
++    --without-node-code-cache \
++    --without-node-snapshot
++  make -j$(getconf _NPROCESSORS_ONLN)
++
++  # Move compilation outputs
++  mkdir -p $TARGET_LIBRARY_PATH/arm64-device
++  for output_file in "${outputs_arm64[@]}"; do
++    cp $LIBRARY_PATH/$output_file $TARGET_LIBRARY_PATH/arm64-device/
++  done
++}
++
++build_for_arm64_simulator() {
++  make clean
++  GYP_DEFINES="target_arch=arm64 host_os=mac target_os=ios"
++  export GYP_DEFINES
++  ./configure \
++    --dest-os=ios \
++    --dest-cpu=arm64 \
++    --with-intl=none \
++    --cross-compiling \
++    --enable-static \
++    --openssl-no-asm \
++    --v8-options=--jitless \
++    --without-node-code-cache \
++    --without-node-snapshot \
++    --ios-simulator
++  make -j$(getconf _NPROCESSORS_ONLN)
++
++  # Move compilation outputs
++  mkdir -p $TARGET_LIBRARY_PATH/arm64-simulator
++  for output_file in "${outputs_arm64[@]}"; do
++      cp $LIBRARY_PATH/$output_file $TARGET_LIBRARY_PATH/arm64-simulator/
++  done
++}
++
++build_for_x64_simulator() {
++  make clean
++  GYP_DEFINES="target_arch=x64 host_os=mac target_os=ios"
++  export GYP_DEFINES
++  arch -x86_64 ./configure \
++    --dest-os=ios \
++    --dest-cpu=x64 \
++    --with-intl=none \
++    --cross-compiling \
++    --enable-static \
++    --openssl-no-asm \
++    --v8-options=--jitless \
++    --without-node-code-cache \
++    --without-node-snapshot
++  arch -x86_64 make -j$(getconf _NPROCESSORS_ONLN)
++
++  # Move compilation outputs
++  mkdir -p $TARGET_LIBRARY_PATH/x64-simulator
++  for output_file in "${outputs_x64[@]}"; do
++    cp $LIBRARY_PATH/$output_file $TARGET_LIBRARY_PATH/x64-simulator/
++  done
++}
++
++build_framework_for_arm64_device() {
++  # Move libraries to the correct location
++  for output_file in "${outputs_arm64[@]}"; do
++    rm -f $TARGET_LIBRARY_PATH/$output_file
++    mv $TARGET_LIBRARY_PATH/arm64-device/$output_file $TARGET_LIBRARY_PATH/$output_file
++  done
++  # Remove libraries that do not exist for this target
++  cp $XCODE_PROJECT_PATH $XCODE_PROJECT_PATH.bak
++  for output_file in "${outputs_x64_only[@]}"; do
++    grep -vF "$output_file" $XCODE_PROJECT_PATH > temp && mv temp $XCODE_PROJECT_PATH
++  done
++  # Compile the Framework Xcode project for arm64 device
++  xcodebuild build \
++    -project $NODELIB_PROJECT_PATH/NodeMobile.xcodeproj \
++    -target "NodeMobile" \
++    -configuration Release \
++    -arch arm64 \
++    -sdk "iphoneos" \
++    SYMROOT=$FRAMEWORK_TARGET_DIR/iphoneos-arm64
++  mv $XCODE_PROJECT_PATH.bak $XCODE_PROJECT_PATH
++}
++
++build_framework_for_arm64_simulator() {
++  # Move libraries to the correct location
++  for output_file in "${outputs_arm64[@]}"; do
++    rm -f $TARGET_LIBRARY_PATH/$output_file
++    mv $TARGET_LIBRARY_PATH/arm64-simulator/$output_file $TARGET_LIBRARY_PATH/$output_file
++  done
++  # Remove libraries that do not exist for this target
++  cp $XCODE_PROJECT_PATH $XCODE_PROJECT_PATH.bak
++  for output_file in "${outputs_x64_only[@]}"; do
++    grep -vF "$output_file" $XCODE_PROJECT_PATH > temp && mv temp $XCODE_PROJECT_PATH
++  done
++  # Compile the Framework Xcode project for arm64 simulator
++  xcodebuild build \
++    -project $NODELIB_PROJECT_PATH/NodeMobile.xcodeproj \
++    -target "NodeMobile" \
++    -configuration Release \
++    -arch arm64 \
++    -sdk "iphonesimulator" \
++    SYMROOT=$FRAMEWORK_TARGET_DIR/iphonesimulator-arm64
++  mv $XCODE_PROJECT_PATH.bak $XCODE_PROJECT_PATH
++}
++
++build_framework_for_x64_simulator() {
++  # Move libraries to the correct location
++  for output_file in "${outputs_x64[@]}"; do
++    rm -f $TARGET_LIBRARY_PATH/$output_file
++    mv $TARGET_LIBRARY_PATH/x64-simulator/$output_file $TARGET_LIBRARY_PATH/$output_file
++  done
++  # Remove libraries that do not exist for this target
++  cp $XCODE_PROJECT_PATH $XCODE_PROJECT_PATH.bak
++  for output_file in "${outputs_arm64_only[@]}"; do
++    grep -vF "$output_file" $XCODE_PROJECT_PATH > temp && mv temp $XCODE_PROJECT_PATH
++  done
++  # Compile the Framework Xcode project for x64 simulator
++  xcodebuild build \
++    -project $NODELIB_PROJECT_PATH/NodeMobile.xcodeproj \
++    -target "NodeMobile" \
++    -configuration Release \
++    -arch x86_64 \
++    -sdk "iphonesimulator" \
++    SYMROOT=$FRAMEWORK_TARGET_DIR/iphonesimulator-x64
++  mv $XCODE_PROJECT_PATH.bak $XCODE_PROJECT_PATH
++}
++
++combine_frameworks() {
++  # Join both simulator outputs into one
++  mkdir -p $FRAMEWORK_TARGET_DIR/iphonesimulator-universal/NodeMobile.framework
++  cp -r $FRAMEWORK_TARGET_DIR/iphonesimulator-arm64/Release-iphonesimulator/NodeMobile.framework/* \
++    $FRAMEWORK_TARGET_DIR/iphonesimulator-universal/NodeMobile.framework/
++  lipo -create \
++    $FRAMEWORK_TARGET_DIR/iphonesimulator-arm64/Release-iphonesimulator/NodeMobile.framework/NodeMobile \
++    $FRAMEWORK_TARGET_DIR/iphonesimulator-x64/Release-iphonesimulator/NodeMobile.framework/NodeMobile \
++    -output $FRAMEWORK_TARGET_DIR/iphonesimulator-universal/NodeMobile.framework/NodeMobile
++
++  # Create a .xcframework combining both iphoneos and iphonesimulator
++  XCFRAMEWORK=$FRAMEWORK_TARGET_DIR/NodeMobile.xcframework
++  xcodebuild -create-xcframework \
++    -framework $FRAMEWORK_TARGET_DIR/iphoneos-arm64/Release-iphoneos/NodeMobile.framework \
++    -framework $FRAMEWORK_TARGET_DIR/iphonesimulator-universal/NodeMobile.framework \
++    -output $XCFRAMEWORK
++
++  echo "Framework built: $XCFRAMEWORK"
++}
++
++# Create a path to build the framework into
++set_framework_target_dir() {
++  if [ -z "$1" ]; then
++    mkdir -p out_ios
++    cd out_ios
++    FRAMEWORK_TARGET_DIR=${PWD}
++    cd ../
++  else
++    rm -rf out_ios_$1
++    mkdir -p out_ios_$1
++    cd out_ios_$1
++    FRAMEWORK_TARGET_DIR=${PWD}
++    cd ../
++  fi
++}
++
++# Interpret the command line arguments
++if [[ $1 == "arm64" ]]; then
++  set_framework_target_dir $1
++  build_for_arm64_device
++  build_framework_for_arm64_device
++elif [[ $1 == "arm64-simulator" ]]; then
++  set_framework_target_dir $1
++  build_for_arm64_simulator
++  build_framework_for_arm64_simulator
++elif [[ $1 == "x64-simulator" ]]; then
++  set_framework_target_dir $1
++  build_for_x64_simulator
++  build_framework_for_x64_simulator
++elif [[ $1 == "combine_frameworks" ]]; then
++  set_framework_target_dir
++  combine_frameworks
++elif [[ $1 == "--help" ]]; then
++  echo "Usage: ios_framework_prepare.sh arm64|arm64-simulator|x64-simulator|combine_frameworks"
++  exit 1
++else
++  build_for_arm64_device
++  build_for_arm64_simulator
++  build_for_x64_simulator
++
++  set_framework_target_dir "arm64"
++  build_framework_for_arm64_device
++  set_framework_target_dir "arm64-simulator"
++  build_framework_for_arm64_simulator
++  set_framework_target_dir "x64-simulator"
++  build_framework_for_x64_simulator
++  set_framework_target_dir
++  combine_frameworks
++
++  source $SCRIPT_DIR/copy_libnode_headers.sh ios
++fi
++
++cd "$ROOT"

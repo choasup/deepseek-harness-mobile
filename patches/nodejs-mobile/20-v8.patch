@@ -1,0 +1,273 @@
+diff --git a/deps/v8/src/heap/base/asm/x64/push_registers_asm.cc b/deps/v8/src/heap/base/asm/x64/push_registers_asm.cc
+index 9780b877..df0ac4a2 100644
+--- a/deps/v8/src/heap/base/asm/x64/push_registers_asm.cc
++++ b/deps/v8/src/heap/base/asm/x64/push_registers_asm.cc
+@@ -23,6 +23,12 @@
+ // at the call.
+ // Source: https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
+ asm(".globl PushAllRegistersAndIterateStack             \n"
++// nodejs-mobile patch: actually, we SHOULD depend on V8_TARGET_* defines:
++// These situations happen because we compile both "host" and "target" code but
++// with flags that reflect only the "target" platform, so we end up incorrectly
++// mixing "host" files (such as this one) with "target" flags (such as
++// V8_TARGET_ARCH_*)
++#ifndef V8_TARGET_ARCH_ARM
+     "PushAllRegistersAndIterateStack:                   \n"
+     // rbp is callee-saved. Maintain proper frame pointer for debugging.
+     "  push %rbp                                        \n"
+@@ -60,6 +66,7 @@ asm(".globl PushAllRegistersAndIterateStack             \n"
+     "  add $224, %rsp                                   \n"
+     // Restore rbp as it was used as frame pointer.
+     "  pop %rbp                                         \n"
++#endif  // !V8_TARGET_ARCH_ARM
+     "  ret                                              \n");
+ 
+ #else  // !_WIN64
+@@ -79,6 +86,8 @@ asm(
+     ".hidden PushAllRegistersAndIterateStack            \n"
+     "PushAllRegistersAndIterateStack:                   \n"
+ #endif  // !__APPLE__
++// nodejs-mobile patch: actually, we SHOULD depend on V8_TARGET_* defines.
++#ifndef V8_TARGET_ARCH_ARM
+     // rbp is callee-saved. Maintain proper frame pointer for debugging.
+     "  push %rbp                                        \n"
+     "  mov %rsp, %rbp                                   \n"
+@@ -101,6 +110,7 @@ asm(
+     "  add $48, %rsp                                    \n"
+     // Restore rbp as it was used as frame pointer.
+     "  pop %rbp                                         \n"
++#endif  // !V8_TARGET_ARCH_ARM
+     "  ret                                              \n");
+ 
+ #endif  // !_WIN64
+diff --git a/deps/v8/src/trap-handler/trap-handler.h b/deps/v8/src/trap-handler/trap-handler.h
+index 1aa7a305..ef16d62a 100644
+--- a/deps/v8/src/trap-handler/trap-handler.h
++++ b/deps/v8/src/trap-handler/trap-handler.h
+@@ -17,20 +17,15 @@ namespace v8 {
+ namespace internal {
+ namespace trap_handler {
+ 
+-// X64 on Linux, Windows, MacOS, FreeBSD.
+-#if V8_HOST_ARCH_X64 && V8_TARGET_ARCH_X64 &&                        \
+-    ((V8_OS_LINUX && !V8_OS_ANDROID) || V8_OS_WIN || V8_OS_DARWIN || \
+-     V8_OS_FREEBSD)
+-#define V8_TRAP_HANDLER_SUPPORTED true
+-// Arm64 (non-simulator) on Mac.
+-#elif V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_ARM64 && V8_OS_DARWIN
+-#define V8_TRAP_HANDLER_SUPPORTED true
+-// Arm64 simulator on x64 on Linux, Mac, or Windows.
+-#elif V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_X64 && \
+-    (V8_OS_LINUX || V8_OS_DARWIN)
+-#define V8_TRAP_HANDLER_VIA_SIMULATOR
++// nodejs-mobile patch.
++//
++// It would require some careful security review before the trap handler
++// can be enabled on Android.  Android may do unexpected things with signal
++// handling and crash reporting that could open up security holes in V8's
++// trap handling.  So we disable the trap handler everywhere except for iOS
++// Simulator on x86_64, where it seems required for successful compilation.
++#if V8_TARGET_ARCH_X64 && V8_TARGET_OS_IOS
+ #define V8_TRAP_HANDLER_SUPPORTED true
+-// Everything else is unsupported.
+ #else
+ #define V8_TRAP_HANDLER_SUPPORTED false
+ #endif
+diff --git a/tools/v8_gypfiles/toolchain.gypi b/tools/v8_gypfiles/toolchain.gypi
+index 61c59e4e..997873d0 100644
+--- a/tools/v8_gypfiles/toolchain.gypi
++++ b/tools/v8_gypfiles/toolchain.gypi
+@@ -1130,6 +1130,25 @@
+           }],
+         ],
+       }],
++      ['OS=="ios"', {
++        'target_conditions': [
++          ['_toolset=="host" and host_os=="mac"', {
++            'xcode_settings': {
++              'SDKROOT': '',
++              'IPHONEOS_DEPLOYMENT_TARGET': '',
++              'MACOSX_DEPLOYMENT_TARGET': '10.10',
++            },
++            'conditions':[
++              ['target_arch=="arm64" and host_arch != "arm64"', {
++                'xcode_settings': {
++                  'ARCHS!': ['arm64'],
++                  'ARCHS': ['x86_64'],
++                },
++              }],
++            ],
++          }],
++        ]
++      }],
+     ],  # conditions
+     'configurations': {
+       'Debug': {
+diff --git a/tools/v8_gypfiles/v8.gyp b/tools/v8_gypfiles/v8.gyp
+index ba8b161f..fd7439c4 100644
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -291,12 +291,12 @@
+           'sources': [
+             '<(V8_ROOT)/src/builtins/riscv64/builtins-riscv64.cc',
+           ],
+-        }],        
++        }],
+         ['v8_target_arch=="loong64" or v8_target_arch=="loong64"', {
+           'sources': [
+             '<(V8_ROOT)/src/builtins/loong64/builtins-loong64.cc',
+           ],
+-        }],        
++        }],
+         ['v8_target_arch=="mips64" or v8_target_arch=="mips64el"', {
+           'sources': [
+             '<(V8_ROOT)/src/builtins/mips64/builtins-mips64.cc',
+@@ -834,6 +834,17 @@
+               ],
+             }],
+           ],
++          'target_conditions': [
++            ['_toolset == "host"', {
++              'target_conditions': [
++                ['host_os in ("mac", "linux")', {
++                  'sources': [
++                    '<!@pymod_do_main(GN-scraper "<(V8_ROOT)/BUILD.gn"  "\\"v8_base_without_compiler.*?is_linux.*?sources \+= ")',
++                  ],
++                }],
++              ],
++            }],
++          ],
+         }],
+         ['v8_target_arch=="arm"', {
+           'sources': [
+@@ -906,12 +917,12 @@
+           'sources': [
+             '<!@pymod_do_main(GN-scraper "<(V8_ROOT)/BUILD.gn"  "\\"v8_base_without_compiler.*?v8_current_cpu == \\"riscv64\\".*?sources \\+= ")',
+           ],
+-        }],        
++        }],
+         ['v8_target_arch=="loong64"', {
+           'sources': [
+             '<!@pymod_do_main(GN-scraper "<(V8_ROOT)/BUILD.gn"  "\\"v8_base_without_compiler.*?v8_current_cpu == \\"loong64\\".*?sources \\+= ")',
+           ],
+-        }],        
++        }],
+         ['OS=="win"', {
+           'msvs_precompiled_header': '<(V8_ROOT)/../../tools/msvs/pch/v8_pch.h',
+           'msvs_precompiled_source': '<(V8_ROOT)/../../tools/msvs/pch/v8_pch.cc',
+@@ -982,6 +993,19 @@
+             'libraries': ['-latomic', ],
+           },
+         }],
++        ['v8_current_cpu=="arm"', {
++          'target_conditions': [
++            ['_toolset == "host"', {
++              'target_conditions': [
++                ['host_os != "mac"', {
++                  'libraries': ['-latomic', ],
++                }],
++              ],
++            }, {
++              'libraries': ['-latomic', ],
++            }],
++          ]
++        }],
+       ],
+     },  # v8_base_without_compiler
+     {
+@@ -1120,22 +1144,32 @@
+               ['_toolset=="host" and host_os=="linux"', {
+                 'libraries': [
+                   '-ldl',
+-                  '-lrt'
++                  '-lrt',
++                  '-lpthread',
+                 ],
+               }],
+             ],
+           },
+           'target_conditions': [
+             ['_toolset=="host"', {
+-              'sources': [
+-                '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
+-                '<(V8_ROOT)/src/base/platform/platform-linux.cc',
++              'target_conditions': [
++                ['host_os == "mac"', {
++                  'sources': [
++                    '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
++                    '<(V8_ROOT)/src/base/platform/platform-macos.cc',
++                  ]
++                }, {
++                  'sources': [
++                    '<(V8_ROOT)/src/base/debug/stack_trace_posix.cc',
++                    '<(V8_ROOT)/src/base/platform/platform-linux.cc',
++                  ]
++                }],
+               ],
+             }, {
+               'sources': [
+                 '<(V8_ROOT)/src/base/debug/stack_trace_android.cc',
+                 '<(V8_ROOT)/src/base/platform/platform-linux.cc',
+-              ],
++              ]
+             }],
+           ],
+         }],
+@@ -1918,6 +1952,46 @@
+       },
+     },  # postmortem-metadata
+ 
++    # nodejs-mobile patch: this whole target
++    {
++      'target_name': 'ndk_sources',
++      'type': 'none',
++      'conditions': [
++        ['OS=="android"', {
++          'copies': [{
++            'files': [
++              '<(ANDROID_NDK_ROOT)/sources/android/cpufeatures/cpu-features.c',
++            ],
++            'destination': '<(SHARED_INTERMEDIATE_DIR)/ndk-sources/',
++          }],
++        }]
++      ]
++    },
++
++    # nodejs-mobile patch: this whole target
++    {
++      'target_name': 'ndk_cpufeatures',
++      'type': 'static_library',
++      'toolsets': ['target'],
++      'conditions': [
++        ['OS=="android" and _toolset=="target"', {
++          'dependencies': ['ndk_sources'],
++          'include_dirs': [
++            '<(ANDROID_NDK_ROOT)/sources/android/cpufeatures',
++            '<(ANDROID_NDK_SYSROOT)/usr/include', # cpu-features.c needs sys/system_properties.h
++          ],
++          'sources': [
++            '<(SHARED_INTERMEDIATE_DIR)/ndk-sources/cpu-features.c',
++          ],
++          'direct_dependent_settings': {
++            'include_dirs': [
++              '<(ANDROID_NDK_ROOT)/sources/android/cpufeatures',
++            ],
++          },
++        }],
++      ],
++    },
++
+     {
+       'target_name': 'v8_zlib',
+       'type': 'static_library',
+@@ -1932,6 +2006,10 @@
+             }]
+           ]
+         }],
++        # nodejs-mobile patch:
++        ['OS=="android" and _toolset=="target"', {
++          'dependencies': ['ndk_cpufeatures'],
++        }],
+       ],
+       'direct_dependent_settings': {
+         'include_dirs': [

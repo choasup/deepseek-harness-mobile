@@ -1,0 +1,436 @@
+diff --git a/deps/cares/config/darwin/ares_config.h b/deps/cares/config/darwin/ares_config.h
+index 6187024a..be044318 100644
+--- a/deps/cares/config/darwin/ares_config.h
++++ b/deps/cares/config/darwin/ares_config.h
+@@ -5,10 +5,10 @@
+ #define CARES_RANDOM_FILE "/dev/urandom"
+ 
+ /* Set to 1 if non-pubilc shared library symbols are hidden */
+-#define CARES_SYMBOL_HIDING 1 
++#define CARES_SYMBOL_HIDING 1
+ 
+ /* Threading enabled */
+-#define CARES_THREADS 1 
++#define CARES_THREADS 1
+ 
+ /* the signed version of size_t */
+ #define CARES_TYPEOF_ARES_SSIZE_T ssize_t
+@@ -20,19 +20,19 @@
+ /* #undef ETC_INET */
+ 
+ /* gethostname() arg2 type */
+-#define GETHOSTNAME_TYPE_ARG2 size_t 
++#define GETHOSTNAME_TYPE_ARG2 size_t
+ 
+ /* getnameinfo() arg1 type */
+-#define GETNAMEINFO_TYPE_ARG1 struct sockaddr * 
++#define GETNAMEINFO_TYPE_ARG1 struct sockaddr *
+ 
+ /* getnameinfo() arg2 type */
+-#define GETNAMEINFO_TYPE_ARG2 socklen_t 
++#define GETNAMEINFO_TYPE_ARG2 socklen_t
+ 
+ /* getnameinfo() arg4 and 6 type */
+-#define GETNAMEINFO_TYPE_ARG46 socklen_t 
++#define GETNAMEINFO_TYPE_ARG46 socklen_t
+ 
+ /* getnameinfo() arg7 type */
+-#define GETNAMEINFO_TYPE_ARG7 int 
++#define GETNAMEINFO_TYPE_ARG7 int
+ 
+ /* number of arguments for getservbyname_r() */
+ /* #undef GETSERVBYNAME_R_ARGS */
+@@ -65,7 +65,7 @@
+ #define HAVE_CLOCK_GETTIME 1
+ 
+ /* clock_gettime() with CLOCK_MONOTONIC support */
+-#define HAVE_CLOCK_GETTIME_MONOTONIC 1 
++#define HAVE_CLOCK_GETTIME_MONOTONIC 1
+ 
+ /* Define to 1 if you have `closesocket` */
+ /* #undef HAVE_CLOSESOCKET */
+@@ -101,7 +101,7 @@
+ #define HAVE_FCNTL_H 1
+ 
+ /* fcntl() with O_NONBLOCK support */
+-#define HAVE_FCNTL_O_NONBLOCK 1 
++#define HAVE_FCNTL_O_NONBLOCK 1
+ 
+ /* Define to 1 if you have `getenv` */
+ #define HAVE_GETENV 1
+@@ -158,7 +158,7 @@
+ /* #undef HAVE_IOCTLSOCKET_FIONBIO */
+ 
+ /* ioctl() with FIONBIO support */
+-#define HAVE_IOCTL_FIONBIO 1 
++#define HAVE_IOCTL_FIONBIO 1
+ 
+ /* Define to 1 if you have the <iphlpapi.h> header file. */
+ /* #undef HAVE_IPHLPAPI_H */
+@@ -329,7 +329,7 @@
+ #define HAVE_SYS_PARAM_H 1
+ 
+ /* Define to 1 if you have the <sys/random.h> header file. */
+-#define HAVE_SYS_RANDOM_H 1
++/* #undef HAVE_SYS_RANDOM_H */
+ 
+ /* Define to 1 if you have the <sys/select.h> header file. */
+ #define HAVE_SYS_SELECT_H 1
+@@ -414,58 +414,58 @@
+ /* #undef PTHREAD_CREATE_JOINABLE */
+ 
+ /* recvfrom() arg5 qualifier */
+-#define RECVFROM_QUAL_ARG5 
++#define RECVFROM_QUAL_ARG5
+ 
+ /* recvfrom() arg1 type */
+-#define RECVFROM_TYPE_ARG1 int 
++#define RECVFROM_TYPE_ARG1 int
+ 
+ /* recvfrom() arg2 type */
+-#define RECVFROM_TYPE_ARG2 void * 
++#define RECVFROM_TYPE_ARG2 void *
+ 
+ /* recvfrom() arg3 type */
+-#define RECVFROM_TYPE_ARG3 size_t 
++#define RECVFROM_TYPE_ARG3 size_t
+ 
+ /* recvfrom() arg4 type */
+-#define RECVFROM_TYPE_ARG4 int 
++#define RECVFROM_TYPE_ARG4 int
+ 
+ /* recvfrom() arg5 type */
+-#define RECVFROM_TYPE_ARG5 struct sockaddr * 
++#define RECVFROM_TYPE_ARG5 struct sockaddr *
+ 
+ /* recvfrom() return value */
+-#define RECVFROM_TYPE_RETV ssize_t 
++#define RECVFROM_TYPE_RETV ssize_t
+ 
+ /* recv() arg1 type */
+-#define RECV_TYPE_ARG1 int 
++#define RECV_TYPE_ARG1 int
+ 
+ /* recv() arg2 type */
+-#define RECV_TYPE_ARG2 void * 
++#define RECV_TYPE_ARG2 void *
+ 
+ /* recv() arg3 type */
+-#define RECV_TYPE_ARG3 size_t 
++#define RECV_TYPE_ARG3 size_t
+ 
+ /* recv() arg4 type */
+-#define RECV_TYPE_ARG4 int 
++#define RECV_TYPE_ARG4 int
+ 
+ /* recv() return value */
+-#define RECV_TYPE_RETV ssize_t 
++#define RECV_TYPE_RETV ssize_t
+ 
+ /* send() arg2 qualifier */
+-#define SEND_QUAL_ARG2 
++#define SEND_QUAL_ARG2
+ 
+ /* send() arg1 type */
+-#define SEND_TYPE_ARG1 int 
++#define SEND_TYPE_ARG1 int
+ 
+ /* send() arg2 type */
+-#define SEND_TYPE_ARG2 void * 
++#define SEND_TYPE_ARG2 void *
+ 
+ /* send() arg3 type */
+-#define SEND_TYPE_ARG3 size_t 
++#define SEND_TYPE_ARG3 size_t
+ 
+ /* send() arg4 type */
+-#define SEND_TYPE_ARG4 int 
++#define SEND_TYPE_ARG4 int
+ 
+ /* send() return value */
+-#define SEND_TYPE_RETV ssize_t 
++#define SEND_TYPE_RETV ssize_t
+ 
+ /* Define to 1 if all of the C90 standard headers exist (not just the ones
+    required in a freestanding environment). This macro is provided for
+diff --git a/lib/internal/modules/cjs/loader.js b/lib/internal/modules/cjs/loader.js
+index 69473df9..dc51fd18 100644
+--- a/lib/internal/modules/cjs/loader.js
++++ b/lib/internal/modules/cjs/loader.js
+@@ -1516,7 +1516,7 @@ Module.createRequire = createRequire;
+  */
+ Module._initPaths = function() {
+   const homeDir = isWindows ? process.env.USERPROFILE : safeGetenv('HOME');
+-  const nodePath = isWindows ? process.env.NODE_PATH : safeGetenv('NODE_PATH');
++  const nodePath = process.env.NODE_PATH; // nodejs-mobile patch
+ 
+   // process.execPath is $PREFIX/bin/node except on Windows where it is
+   // $PREFIX\node.exe where $PREFIX is the root of the Node.js installation.
+diff --git a/src/debug_utils.cc b/src/debug_utils.cc
+index fadf321c..e54a8e61 100644
+--- a/src/debug_utils.cc
++++ b/src/debug_utils.cc
+@@ -504,7 +504,33 @@ void FWrite(FILE* file, const std::string& str) {
+   return;
+ #elif defined(__ANDROID__)
+   if (file == stderr) {
+-    __android_log_print(ANDROID_LOG_ERROR, "nodejs", "%s", str.data());
++    // Android log implementations will truncate log messages to 1023 length.
++    const int maxLength = 1023;
++
++    int n = str.size();
++
++    if (n <= maxLength) {
++      __android_log_print(ANDROID_LOG_ERROR, "nodejs", "%s", str.data());
++    } else {
++      // Divide the output in lines with length < maxLength.
++      std::vector<char> line(maxLength+1);
++      const char* sep = "\n";
++      const char* token = str.c_str();
++      while (*token) {
++        int tokenLen = std::strcspn(token, sep);
++        if (tokenLen > maxLength) {
++          tokenLen = maxLength;
++        }
++        std::strncpy(line.data(), token, tokenLen);
++        line.data()[tokenLen]='\0';
++        __android_log_print(ANDROID_LOG_ERROR, "nodejs", "%s", line.data());
++        token += tokenLen;
++        if (*token == '\n') {
++          // __android_log_write will introduce the line break.
++          token++;
++        }
++      }
++    }
+     return;
+   }
+ #endif
+diff --git a/src/node.cc b/src/node.cc
+index 367d4732..7789296b 100644
+--- a/src/node.cc
++++ b/src/node.cc
+@@ -681,6 +681,8 @@ void ResetStdio() {
+       CHECK_NE(err, -1);
+     }
+ 
++#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
++    // tcsetattr is not working on iOS devices.
+     if (s.isatty) {
+       sigset_t sa;
+       int err;
+@@ -700,6 +702,7 @@ void ResetStdio() {
+       // tcsetattr will fail with err == -1 and errno == EPERM.
+       CHECK_IMPLIES(err != 0, err == -1 && errno == EPERM);
+     }
++#endif  // !(defined(__APPLE__) && TARGET_OS_IPHONE)
+   }
+ #endif  // __POSIX__
+ }
+diff --git a/src/node_credentials.cc b/src/node_credentials.cc
+index f2980007..83c35695 100644
+--- a/src/node_credentials.cc
++++ b/src/node_credentials.cc
+@@ -176,6 +176,19 @@ static char* name_by_uid(uid_t uid) {
+   return nullptr;
+ }
+ 
++#ifdef __ANDROID__
++// Android has getgrnam instead of getgrnam_r.
++static gid_t gid_by_name(const char* name) {
++  struct group* pp = getgrnam(name);  // NOLINT(runtime/threadsafe_fn)
++
++  errno = 0;
++
++  if (pp != nullptr)
++    return pp->gr_gid;
++
++  return gid_not_found;
++}
++#else  // __ANDROID__
+ static gid_t gid_by_name(const char* name) {
+   struct group pwd;
+   struct group* pp;
+@@ -189,6 +202,7 @@ static gid_t gid_by_name(const char* name) {
+ 
+   return gid_not_found;
+ }
++#endif  // __ANDROID__
+ 
+ #if 0  // For future use.
+ static const char* name_by_gid(gid_t gid) {
+@@ -260,6 +274,8 @@ static void GetEGid(const FunctionCallbackInfo<Value>& args) {
+   args.GetReturnValue().Set(static_cast<uint32_t>(getegid()));
+ }
+ 
++#ifndef __ANDROID__
++// Android blocks setting Uid and Gid.
+ static void SetGid(const FunctionCallbackInfo<Value>& args) {
+   Environment* env = Environment::GetCurrent(args);
+   CHECK(env->owns_process_state());
+@@ -335,6 +351,7 @@ static void SetEUid(const FunctionCallbackInfo<Value>& args) {
+     args.GetReturnValue().Set(0);
+   }
+ }
++#endif  // ifndef __ANDROID__
+ 
+ static void GetGroups(const FunctionCallbackInfo<Value>& args) {
+   Environment* env = Environment::GetCurrent(args);
+@@ -358,6 +375,8 @@ static void GetGroups(const FunctionCallbackInfo<Value>& args) {
+     args.GetReturnValue().Set(array.ToLocalChecked());
+ }
+ 
++#ifndef __ANDROID__
++// Android blocks setting groups
+ static void SetGroups(const FunctionCallbackInfo<Value>& args) {
+   Environment* env = Environment::GetCurrent(args);
+ 
+@@ -387,6 +406,7 @@ static void SetGroups(const FunctionCallbackInfo<Value>& args) {
+ 
+   args.GetReturnValue().Set(0);
+ }
++#endif  // ifndef __ANDROID__
+ 
+ static void InitGroups(const FunctionCallbackInfo<Value>& args) {
+   Environment* env = Environment::GetCurrent(args);
+@@ -443,11 +463,13 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+   registry->Register(GetGroups);
+ 
+   registry->Register(InitGroups);
++  #ifndef __ANDROID__
+   registry->Register(SetEGid);
+   registry->Register(SetEUid);
+   registry->Register(SetGid);
+   registry->Register(SetUid);
+   registry->Register(SetGroups);
++  #endif
+ #endif  // NODE_IMPLEMENTS_POSIX_CREDENTIALS
+ }
+ 
+@@ -470,11 +492,13 @@ static void Initialize(Local<Object> target,
+ 
+   if (env->owns_process_state()) {
+     SetMethod(context, target, "initgroups", InitGroups);
++    #ifndef __ANDROID__ // nodejs-mobile patch
+     SetMethod(context, target, "setegid", SetEGid);
+     SetMethod(context, target, "seteuid", SetEUid);
+     SetMethod(context, target, "setgid", SetGid);
+     SetMethod(context, target, "setuid", SetUid);
+     SetMethod(context, target, "setgroups", SetGroups);
++    #endif
+   }
+ #endif  // NODE_IMPLEMENTS_POSIX_CREDENTIALS
+ }
+diff --git a/src/node_env_var.cc b/src/node_env_var.cc
+index 94936ea1..b65e08da 100644
+--- a/src/node_env_var.cc
++++ b/src/node_env_var.cc
+@@ -221,9 +221,12 @@ std::shared_ptr<KVStore> KVStore::Clone(Isolate* isolate) const {
+   for (uint32_t i = 0; i < keys_length; i++) {
+     Local<Value> key = keys->Get(context, i).ToLocalChecked();
+     CHECK(key->IsString());
+-    copy->Set(isolate,
+-              key.As<String>(),
+-              Get(isolate, key.As<String>()).ToLocalChecked());
++    MaybeLocal<String> value_string = Get(isolate, key.As<String>());
++    if (!value_string.IsEmpty()) {
++      // On Android, it's possible that some environment variables get removed,
++      // such as LD_PRELOAD.
++      copy->Set(isolate, key.As<String>(), value_string.ToLocalChecked());
++    }
+   }
+   return copy;
+ }
+diff --git a/src/node_internals.h b/src/node_internals.h
+index 427cfab4..13af046a 100644
+--- a/src/node_internals.h
++++ b/src/node_internals.h
+@@ -292,7 +292,7 @@ class ThreadPoolWork {
+ 
+ // Functions defined in node.cc that are exposed via the bootstrapper object
+ 
+-#if defined(__POSIX__) && !defined(__ANDROID__) && !defined(__CloudABI__)
++#if defined(__POSIX__) && !(defined(__ANDROID__) && __ANDROID_API__ < 21) && !defined(__CloudABI__)  // NOLINT(whitespace/line_length)
+ #define NODE_IMPLEMENTS_POSIX_CREDENTIALS 1
+ #endif  // defined(__POSIX__) && !defined(__ANDROID__) && !defined(__CloudABI__)
+ 
+diff --git a/src/node_metadata.cc b/src/node_metadata.cc
+index 22546e9d..83435594 100644
+--- a/src/node_metadata.cc
++++ b/src/node_metadata.cc
+@@ -35,6 +35,10 @@
+ #include <unicode/uversion.h>
+ #endif  // NODE_HAVE_I18N_SUPPORT
+ 
++#ifdef NODE_MOBILE
++#include "node_mobile_version.h"
++#endif  // NODE_MOBILE
++
+ namespace node {
+ 
+ namespace per_process {
+@@ -89,6 +93,9 @@ Metadata::Versions::Versions() {
+       NODE_STRINGIFY(LLHTTP_VERSION_MINOR)
+       "."
+       NODE_STRINGIFY(LLHTTP_VERSION_PATCH);
++#ifdef NODE_MOBILE
++  mobile = NODE_MOBILE_VERSION_STRING;
++#endif  // NODE_MOBILE
+ 
+   brotli =
+     std::to_string(BrotliEncoderVersion() >> 24) +
+diff --git a/src/node_metadata.h b/src/node_metadata.h
+index cf051585..e8deb505 100644
+--- a/src/node_metadata.h
++++ b/src/node_metadata.h
+@@ -68,6 +68,13 @@ namespace node {
+ #define NODE_VERSIONS_KEY_INTL(V)
+ #endif  // NODE_HAVE_I18N_SUPPORT
+ 
++#ifdef NODE_MOBILE
++#define NODE_VERSIONS_KEY_MOBILE(V)                                            \
++  V(mobile)
++#else
++#define NODE_VERSIONS_KEY_MOBILE(V)
++#endif  // NODE_MOBILE
++
+ #ifdef OPENSSL_INFO_QUIC
+ #define NODE_VERSIONS_KEY_QUIC(V)                                             \
+   V(ngtcp2)                                                                   \
+@@ -80,6 +87,7 @@ namespace node {
+   NODE_VERSIONS_KEYS_BASE(V)                                                   \
+   NODE_VERSIONS_KEY_CRYPTO(V)                                                  \
+   NODE_VERSIONS_KEY_INTL(V)                                                    \
++  NODE_VERSIONS_KEY_MOBILE(V)                                                  \
+   NODE_VERSIONS_KEY_QUIC(V)
+ 
+ class Metadata {
+diff --git a/src/node_mobile_version.h b/src/node_mobile_version.h
+new file mode 100644
+index 00000000..5953e379
+--- /dev/null
++++ b/src/node_mobile_version.h
+@@ -0,0 +1,24 @@
++#ifndef SRC_NODE_MOBILE_VERSION_H_
++#define SRC_NODE_MOBILE_VERSION_H_
++
++#include "node_version.h"
++
++#define NODE_MOBILE_MAJOR_VERSION 18
++#define NODE_MOBILE_MINOR_VERSION 20
++#define NODE_MOBILE_PATCH_VERSION 4
++
++#define NODE_MOBILE_VERSION_IS_RELEASE NODE_VERSION_IS_RELEASE
++
++# if NODE_MOBILE_VERSION_IS_RELEASE
++#  define NODE_MOBILE_TAG ""
++# else
++#  define NODE_MOBILE_TAG "-pre"
++# endif
++
++#define NODE_MOBILE_VERSION_STRING \
++  NODE_STRINGIFY(NODE_MOBILE_MAJOR_VERSION) "." \
++  NODE_STRINGIFY(NODE_MOBILE_MINOR_VERSION) "." \
++  NODE_STRINGIFY(NODE_MOBILE_PATCH_VERSION)     \
++  NODE_MOBILE_TAG
++
++#endif  // SRC_NODE_MOBILE_VERSION_H_

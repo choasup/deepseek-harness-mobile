@@ -1,0 +1,25 @@
+zlib 的 zutil.h 把"经典 Mac OS（OS X 之前）"的分支守卫写成
+`defined(MACOS) || defined(TARGET_OS_MAC)`，而现代 macOS SDK 的
+TargetConditionals.h 就是把 TARGET_OS_MAC 定义成 1 的。于是这个本该只在
+1999 年的 Mac 上生效的分支在今天全量命中，`#define fdopen(fd,mode) NULL`
+把随后 <stdio.h> 里 fdopen 的声明打烂：
+
+  _stdio.h:322:7: error: expected identifier or '('
+    FILE *fdopen(int, const char *) ...
+  note: expanded from macro 'fdopen'
+    #define fdopen(fd,mode) NULL
+
+旁证：同一份编译输出里有 `OS_CODE macro redefined` 警告——__APPLE__ 分支
+（OS_CODE 19）与这个分支（OS_CODE 7）同时命中，本来就不该同时成立。
+
+加上 !defined(__APPLE__)：现代 Apple 平台跳过整个经典 Mac 分支，
+OS_CODE 由后面的 __APPLE__ 分支给出（19），与不打补丁时的最终结果一致。
+
+--- a/deps/v8/third_party/zlib/zutil.h
++++ b/deps/v8/third_party/zlib/zutil.h
+@@ -144,1 +144,4 @@
+-#if defined(MACOS) || defined(TARGET_OS_MAC)
++/* dsh-mobile: TARGET_OS_MAC 在现代 macOS SDK 上恒为 1，这个分支是给
++   经典 Mac OS 的，误命中会 #define fdopen 为 NULL 从而打烂 <stdio.h>。
++   见 patches/0001-v8-zlib-classic-macos-guard.patch */
++#if (defined(MACOS) || defined(TARGET_OS_MAC)) && !defined(__APPLE__)

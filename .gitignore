@@ -3,3 +3,8 @@ node_modules/
 *.log
 .credentials.yaml
 lib/
+
+# nodejs-mobile 的源码树（~700MB 第三方代码）与构建产物。
+# 复现方式记在 docs/ios-build-notes.md：按记录的 commit clone，再打 patches/。
+vendor/nodejs-mobile/
+vendor/make-shim/

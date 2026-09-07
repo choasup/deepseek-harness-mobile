@@ -397,3 +397,61 @@ nodejs-mobile 在 `push_registers_asm.cc` 里加 `#ifndef V8_TARGET_ARCH_ARM`
 守卫，处理的是同一类错位（他们的注释原话："we compile both host and target
 code but with flags that reflect only the target platform"）。我们这边用给
 host 补 `ARCHS` 解决，不改 V8 源码——**修配置比修源码更容易随版本移植**。
+
+---
+
+## 检查点 3 完成：Node 22.19 的 iOS arm64 静态库
+
+```
+$ lipo -info libnode.a
+Non-fat file: libnode.a is architecture: arm64
+
+$ ar x libnode.a async_resource.o && vtool -show-build async_resource.o
+ platform IOS
+    minos 17.0
+      sdk 26.4
+```
+
+**33 个静态库，共 118 MB**（关掉调试符号之后）。关键几个：
+
+| 库 | 体积 |
+|---|---|
+| `libv8_base_without_compiler.a` | 28 MB |
+| `libnode.a` | 21 MB |
+| `libv8_initializers.a` | 20 MB |
+| `libv8_snapshot.a` | 2.3 MB |
+
+### 最后一个"失败"不是失败
+
+`make` 最终仍以非零码退出，卡在链接 `embedtest`：
+
+```
+Undefined symbols for architecture arm64:
+  "_CFRelease", referenced from:
+      absl::time_internal::cctz::local_time_zone() in libabseil.a
+```
+
+`embedtest` / `cctest` / `node` 都是**可执行文件**，而我们要的是静态库。
+abseil 的时区查询在 Apple 平台用 CoreFoundation，那些测试可执行文件没链这个
+框架——但 **iOS app 本来就会链 CoreFoundation**，所以这对我们不构成问题。
+
+**判断构建是否成功，不能只看 make 的退出码**：这套构建的目标是
+`out/Release/*.a`，不是 `out/Release/node`。检查产物，别检查退出码。
+
+### 九个失败的归类
+
+| # | 报错说的 | 真正的原因 | 类别 |
+|---|---|---|---|
+| 1 | zlib 里 `fdopen` 语法错误 | `TARGET_OS_MAC` 在现代 SDK 恒为 1，经典 Mac OS 分支全量命中 | `__APPLE__` 族 |
+| 2 | gtest 不支持低于 C++17 | gyp 生成器只在 `flavor=="mac"` 时翻译 `xcode_settings` | `__APPLE__` 族 |
+| 3 | ncrypto `operator<=` 不能作变量名 | `common_node.gypi` 的 C++20 覆盖没带 ios（该文件 Node 18 时代不存在） | 版本漂移 |
+| 4 | 找不到 `sys/random.h` | iOS SDK 没有，而 c-ares 让 ios 共用 darwin 配置 | `__APPLE__` 族 |
+| 5 | `Killed: 9` | host 工具被编成 iOS 二进制 | host/target 错位 |
+| 6 | ncrypto 又炸（自己造的） | C++ 标准放进 `target_conditions`，求值太晚顶掉了覆盖 | gyp 求值顺序 |
+| 7 | torque 不能用 `try` | 异常开关同上，盖掉了 torque 自己的设置 | gyp 求值顺序 |
+| 8 | `kSecTrustSettings*` 未声明 | iOS 的 Security 框架没有这套 API，守卫写的是 `__APPLE__` | `__APPLE__` 族 |
+| 9 | `blr` 不是合法指令 | host 没给 ARCHS，回落 x86_64 去读 arm64 汇编 | host/target 错位 |
+
+**四类，没有一类是"代码有 bug"。** 全部是平台假设错位，而且**九个里有八个的
+报错信息指向使用点、不指向假设**。这类工作的难点不在改代码，在于把症状翻译
+回原因。

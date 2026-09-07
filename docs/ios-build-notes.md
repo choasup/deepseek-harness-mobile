@@ -507,3 +507,47 @@ Security、SystemConfiguration。
 静态库只编了 iphoneos 架构：
 `ld: building for 'iOS-simulator', but linking in object file built for 'iOS'`。
 要模拟器得再编一轮 arm64-simulator。真机是目标，暂不做。
+
+---
+
+## 检查点 4.2：设备上的逐包 import 探测
+
+第一次结果（`--with-intl=none` 编出来的 Node）：**55/83**
+
+| 失败类型 | 个数 |
+|---|---|
+| Unicode 属性转义 `\p{...}` | **25** |
+| 原生模块（已禁用的插件：sandbox / subprocess） | 2 |
+| sharp（已禁用的 attachment-local） | 1 |
+
+### 失败 #10：`--with-intl=none` 把 `\p{...}` 一起关掉了
+
+```
+Invalid regular expression: /^[\p{XID_Start}_]\p{XID_Continue}*$/u:
+  Invalid property name in character class
+```
+
+25 个包全栽在这一条，而且都是核心：`agent-loop`、`tool-fs`、`subagent`、
+`llm-deepseek`、`plan-mode`……
+
+Unicode 属性转义（`\p{XID_Start}`、`\p{L}`、`\p{N}`）依赖 V8 的
+`V8_INTL_SUPPORT`，而 `--with-intl=none` 会把它关掉。nodejs-mobile 的脚本用的
+就是 `none`（Node 18 时代、目标只是跑通示例），照抄过来就踩中了。
+
+改成 `--with-intl=small-icu`：只带英文 locale 数据，但 **Unicode 属性表是全的**，
+正是需要的那部分。`config.gypi` 里 `v8_enable_i18n_support` 从 0 变 1。
+
+**这条只有在真机上跑 dsh 才会暴露**：Mac 基线用的是官方 Node（自带 full-icu），
+83 个包全过；设备内那份是自己编的，参数不同。**跨平台移植里，"同一份代码在
+两边跑"不等于"两边的 runtime 一样"。**
+
+### 其余 3 个失败符合预期
+
+它们对应的插件在 mobile profile 里都是禁用的，import 失败不影响运行：
+
+- `attachment-local` ← sharp（原生，见 F' 段）
+- `sandbox-local` ← koffi（原生）
+- `subprocess-local` ← node-pty（原生）
+
+顺带一提，node-pty 在设备上找的是 `prebuilds/ios-arm64/pty.node`——
+说明 Node 正确地把自己认成了 `ios` 平台。

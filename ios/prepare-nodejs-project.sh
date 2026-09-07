@@ -61,10 +61,32 @@ cat > profiles/mobile-web/package.json <<JSON
 JSON
 printf '[]\n' > profiles/mobile-web/cordis.patch.yml
 
-npm install --omit=dev --no-audit --no-fund
+# 五个包必须**一次装齐**。`npm install --no-save <path>` 逐个装是错的：
+# 每次安装都会把不在 package.json 里的包剪掉，结果只剩最后一个。
+# 实测踩过——bundle 里只剩 client-ui-layout-mobile，另外四个全没了。
+npm install --omit=dev --no-audit --no-fund \
+  "$REPO/packages/mobile-app" \
+  "$REPO/packages/remote-registry" \
+  "$REPO/packages/shell-ssh" \
+  "$REPO/packages/tool-fs-search" \
+  "$REPO/packages/client-ui-layout-mobile"
+
+# npm 对本地 file: 依赖建的是**符号链接**，指向仓库里的源码目录——即逃出了
+# app bundle。iOS 的安装器会直接拒绝：
+#     invalid symlink at .../DshMobile.app/nodejs-project/node_modules/@dsh-mobile/mobile-app
+#     MIFileManager validateSymlinksInURLDoNotEscapeURL / InvalidSymlink
+# 换成实体拷贝。只拷 lib/ 与包元数据，src/tests/node_modules 在 bundle 里用不上。
+echo "== 把逃出 bundle 的符号链接换成实体拷贝 =="
 for p in mobile-app remote-registry shell-ssh tool-fs-search client-ui-layout-mobile; do
-  npm install --no-save "$REPO/packages/$p"
+  L="node_modules/@dsh-mobile/$p"
+  [ -L "$L" ] || continue
+  rm "$L" && mkdir -p "$L"
+  cp -R "$REPO/packages/$p/lib" "$L/" 2>/dev/null || true
+  cp "$REPO/packages/$p/package.json" "$L/"
+  [ -f "$REPO/packages/$p/cordis.patch.yml" ] && cp "$REPO/packages/$p/cordis.patch.yml" "$L/"
 done
+ESCAPING=$(find . -type l -exec sh -c 'T=$(readlink "$1"); case "$T" in /*|*../../../*) echo "$1";; esac' _ {} \; 2>/dev/null)
+[ -n "$ESCAPING" ] && { echo "仍有逃出 bundle 的符号链接：" >&2; echo "$ESCAPING" >&2; exit 1; }
 
 echo "== 剥掉原生二进制（iOS 上一律加载不了，纯死重）=="
 BEFORE=$(du -sm . | cut -f1)

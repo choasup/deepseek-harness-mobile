@@ -41,19 +41,36 @@ enum NodeHost {
             .appendingPathComponent("node-probe.json")
     }
 
+    /// 跑 bundle 里的逐包 import 探测（检查点 4.2），结果写进 Documents。
+    ///
+    /// 这一步回答的是"dsh 的 83 个包在这台 iPhone 上有几个能 import"。
+    /// 不直接启动 dsh，是因为那样一个包的失败会被 AggregateError 裹进几十个里，
+    /// 而且第一个失败就中止，看不到全貌。
+    static func runImportProbe() {
+        guard let root = projectRoot else { return }
+        runProbeArgs([
+            "node",
+            root.appendingPathComponent("probe-imports.mjs").path,
+            root.path,
+        ])
+    }
+
     /// 跑一句 Node 并把 stdout 写进 Documents。**同步阻塞**，只用于验证。
     ///
     /// 这是「Node 到底能不能在这台设备上起来」的最小判据：跑通了就说明
     /// 交叉编译的静态库、jitless 的 V8、以及 app 内的线程栈都成立。
     /// 在此之前谈 dsh 没有意义。
     static func runProbeSynchronously(_ script: String) {
+        runProbeArgs(["node", "-e", script])
+    }
+
+    private static func runProbeArgs(_ args: [String]) {
         let out = probeResultURL
         try? FileManager.default.removeItem(at: out)
         // Node 往 fd 1 写；app 里那个 fd 不指向任何地方，所以先把它重定向到文件。
         guard freopen(out.path, "w", stdout) != nil else { return }
         defer { fflush(stdout) }
 
-        var args = ["node", "-e", script]
         var cStrings = args.map { strdup($0) }
         defer { cStrings.forEach { free($0) } }
         cStrings.withUnsafeMutableBufferPointer { buf in

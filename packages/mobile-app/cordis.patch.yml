@@ -310,6 +310,28 @@
 - id: agent-presets
   disabled: true
 
+# ── F'. 禁用：依赖 sharp 的附件存储 ───────────────────────────────────
+#
+# `dsh-attachment-local` 的第 8 行是 `import sharp from "sharp"`——**静态
+# import，没有兜底**。sharp 是原生模块（libvips），iOS 上 dlopen 不了；
+# 它的 WASM 变体也救不了，因为 jitless 关掉了 WebAssembly。
+#
+# 禁用它是安全的，已核实消费者的依赖形态：
+#   `dsh-tool-fs` 的顶层 inject 是 ["tools","fs","systemPrompt"]，**不含
+#   attachments**；它对附件用的是 `ctx.inject(['attachments'], …)` 子 fiber
+#   （其注释原话："so the tool exists only while a durable [service is
+#   present]"）。服务不在，`read_image` 工具就不注册，不会 PENDING。
+#
+# **代价是实打实的**：附件存储不可用，模型看不到图片。在手机上这尤其可惜——
+# 摄像头本该是这个形态最强的输入。
+#
+# **出路不是把 sharp 弄上 iOS，而是绕开它**：图像归一化（缩放、编码、取
+# 元数据）在 iOS 上应该交给系统的 CoreImage / ImageIO 做，由原生侧处理完再
+# 把字节交给 Node。手机的图像 API 比 libvips 更合适，也不需要 dlopen。
+# 这属于原生桥的工作，不在这一轮范围内。
+- id: attachment-local
+  disabled: true
+
 # ── G. 换掉桌面版 layout（只在叠加 dsh-web-app 时存在这一行）───────────
 #
 # `dsh-client-ui-layout` 是三栏 AppFrame：侧栏 | 会话 | 详情，栏间有 8px 拖拽

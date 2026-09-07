@@ -11,6 +11,13 @@ targets:
     sources:
       - path: DshMobile
       - path: NodeRuntime
+      # 设备上要跑的那套 Node 代码（dsh 及其依赖，约 231MB）。
+      # type: folder 是关键——按文件夹整体引用，保持目录结构；
+      # 默认的 group 方式会把每个文件平铺进 Resources，node_modules 的
+      # 相对路径全部失效。不入库，由 prepare-nodejs-project.sh 产出。
+      - path: nodejs-project
+        type: folder
+        buildPhase: resources
     # xcodegen 会重新生成这个 plist，所以键必须写在这里而不是文件里
     # ——直接编辑生成出来的 Info.plist 会在下次 generate 时被静默丢弃。
     info:

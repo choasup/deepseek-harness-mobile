@@ -568,3 +568,20 @@ libicustubdata.a
 `out/Release/*.a`，不是 make 的退出码。**
 
 app 重新链接一次通过（34 个库）。
+
+### 检查点 4.2 通过：设备上 80/83
+
+换成 small-icu 之后重测：
+
+```json
+{ "platform": "ios/arm64", "node": "v22.19.0", "jitless": true,
+  "total": 83, "ok": 80,
+  "failed": [ "dsh-attachment-local", "dsh-sandbox-local", "dsh-subprocess-local" ] }
+```
+
+**25 个 `\p{...}` 失败全部消失**，与 Mac 基线（同样 80/83）逐项一致。
+剩下 3 个对应的插件在 mobile profile 里都是禁用的。
+
+**副作用一则**：探测输出末尾会多出两行 `0.5`——某个包在 import 时往 stdout
+打了东西，把 JSON 弄成了非法。不影响判断，但解析时要容错。设备上没有别的
+输出通道，stdout 是共享的，这类污染以后还会有。

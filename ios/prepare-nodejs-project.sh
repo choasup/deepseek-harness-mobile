@@ -9,9 +9,21 @@
 # ① **bundle 是只读的**，所以这里只放代码。会话、存储、凭据由 NodeHost.swift
 #    把 DSH_HOME 指到 Application Support 去写。
 #
-# ② **不能有原生模块**（.node 文件）：iOS 不允许 dlopen 未签名的二进制，
-#    而 app 内的 .node 也不在签名链里。装完会检查一遍，发现就报错——
-#    留到运行时才发现的话，报错会是一句无关的 import 失败。
+# ② **原生模块（.node）在 iOS 上一律加载不了**：不允许 dlopen 不在签名链里的
+#    二进制。npm 会按**主机**平台装一堆 darwin-arm64 / linux / win32 的预编译
+#    产物，在 app 里全是死重（实测 node-pty 26MB + sharp 18MB + koffi 2MB）。
+#    所以装完把 .node 与 prebuilds/ 剥掉，**保留 JS**。
+#
+#    保留 JS 而不是删整个包，是因为失败模式不同：删包会变成"模块找不到"，
+#    可能打断本来能走兜底的代码路径；只删二进制则等同于 iOS 上的真实情况
+#    ——dlopen 失败，由调用方的 try/catch 接住。
+#
+#    实测这些原生依赖都不是硬依赖：
+#      node-pty      ← dsh-subprocess-local，该插件在 mobile profile 里已禁用
+#      node-addon-require-builtin ← cordis-plugin-loader，但用的是
+#                      `try { require(...) } catch {}`，失败即走它自己文档里
+#                      写的 no-internals 路径
+#    真正的判据是检查点 4.2 的逐包 import 探测，不是文件是否存在。
 set -euo pipefail
 cd "$(dirname "$0")"
 REPO="$(cd .. && pwd)"
@@ -54,12 +66,16 @@ for p in mobile-app remote-registry shell-ssh tool-fs-search client-ui-layout-mo
   npm install --no-save "$REPO/packages/$p"
 done
 
-echo "== 检查有没有原生模块 =="
-NATIVE=$(find . -name "*.node" -not -path "*/test/*" 2>/dev/null || true)
-if [ -n "$NATIVE" ]; then
-  echo "发现 .node 原生模块，iOS 上加载不了：" >&2
-  echo "$NATIVE" >&2
-  exit 1
-fi
+echo "== 剥掉原生二进制（iOS 上一律加载不了，纯死重）=="
+BEFORE=$(du -sm . | cut -f1)
+find . -name "*.node" -type f -delete 2>/dev/null || true
+find . -type d -name "prebuilds" -exec rm -rf {} + 2>/dev/null || true
+# npm 按主机平台装的可选原生包，整包都用不上
+rm -rf node_modules/@img node_modules/@koromix 2>/dev/null || true
+AFTER=$(du -sm . | cut -f1)
+echo "剥掉 $((BEFORE - AFTER)) MB"
+
+REMAIN=$(find . -name "*.node" -type f 2>/dev/null | head -5)
+[ -n "$REMAIN" ] && { echo "仍有 .node 残留：" >&2; echo "$REMAIN" >&2; exit 1; }
 echo "干净：没有 .node"
 du -sh . | cut -f1 | xargs echo "nodejs-project 体积:"

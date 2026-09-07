@@ -455,3 +455,55 @@ abseil 的时区查询在 Apple 平台用 CoreFoundation，那些测试可执行
 **四类，没有一类是"代码有 bug"。** 全部是平台假设错位，而且**九个里有八个的
 报错信息指向使用点、不指向假设**。这类工作的难点不在改代码，在于把症状翻译
 回原因。
+
+---
+
+## 里程碑：Node 22.19.0 在真机上跑起来了（2026-09-07）
+
+iPhone 17 Pro Max，app 内探针写到 Documents，`devicectl copy from` 取回：
+
+```json
+{
+  "node": "v22.19.0",
+  "platform": "ios/arm64",
+  "jitless": true,
+  "hasSqlite": true,
+  "hasZstd": true,
+  "hasWithResolvers": true,
+  "hasStripTypes": true,
+  "cpus": 6
+}
+```
+
+**决定版本下限的那三个 API 在设备上全部可用**（zstd 22.15 / `Promise.withResolvers`
+22.0 / `stripTypeScriptTypes` 22.13），`node:sqlite` 也能用。`jitless: true`
+确认 V8 跑在无 JIT 模式——这是 iOS 的硬要求，也是整个方案成立的前提。
+
+### 取设备上输出的办法
+
+app 里 Node 的 stdout **不指向任何地方**，`console.log` 直接消失。做法：
+
+```swift
+freopen(documentsURL.path, "w", stdout)   // 先重定向
+dsh_node_start(argc, argv)                // 再启动
+```
+
+然后 `xcrun devicectl device copy from --domain-type appDataContainer
+--domain-identifier <bundle id> --source Documents/node-probe.json`。
+
+### 链接：一次通过
+
+30 个静态库（排除 gtest 与 torque_base）零未定义符号。需要额外链的框架只有
+三个：CoreFoundation（abseil 时区查询，就是 embedtest 当初缺的那个）、
+Security、SystemConfiguration。
+
+**一次误判记下来**：`.app/DshMobile` 只有 90K，我据此以为库没链进去。
+错了——Xcode 16+ 默认走 debug dylib，真代码在 `DshMobile.debug.dylib`
+（74 MB，113305 个 node/v8 符号）。桩里的符号 `___debug_blank_executor_main`
+是判据。**在 Xcode 16+ 上看 .app 体积判断链接结果不成立。**
+
+### 模拟器跑不了
+
+静态库只编了 iphoneos 架构：
+`ld: building for 'iOS-simulator', but linking in object file built for 'iOS'`。
+要模拟器得再编一轮 arm64-simulator。真机是目标，暂不做。

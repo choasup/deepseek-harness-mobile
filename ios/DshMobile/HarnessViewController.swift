@@ -95,6 +95,24 @@ final class HarnessViewController: UIViewController {
             settingsButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
 
+        // 设备内 runtime 的最小验证：先确认 Node 能起来，再谈别的。
+        // 结果写进 Documents，用 devicectl 取回。
+        Thread {
+            NodeHost.runProbeSynchronously("""
+            const os = require('node:os')
+            console.log(JSON.stringify({
+              node: process.version,
+              platform: process.platform + '/' + process.arch,
+              jitless: typeof WebAssembly === 'undefined',
+              hasSqlite: (() => { try { require('node:sqlite'); return true } catch { return false } })(),
+              hasZstd: typeof require('node:zlib').createZstdDecompress === 'function',
+              hasWithResolvers: typeof Promise.withResolvers === 'function',
+              hasStripTypes: (() => { try { return typeof require('node:module').stripTypeScriptTypes === 'function' } catch { return false } })(),
+              cpus: os.cpus().length,
+            }, null, 2))
+            """)
+        }.start()
+
         load()
     }
 

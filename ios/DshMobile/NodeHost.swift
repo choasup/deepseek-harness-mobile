@@ -33,6 +33,34 @@ enum NodeHost {
 
     private static var thread: Thread?
 
+    /// 探针结果落盘的位置。放 Documents 是为了能用
+    /// `xcrun devicectl device copy from` 取回来——设备上没有终端，
+    /// 而 Node 的 stdout 在 app 里默认哪儿都不去。
+    static var probeResultURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("node-probe.json")
+    }
+
+    /// 跑一句 Node 并把 stdout 写进 Documents。**同步阻塞**，只用于验证。
+    ///
+    /// 这是「Node 到底能不能在这台设备上起来」的最小判据：跑通了就说明
+    /// 交叉编译的静态库、jitless 的 V8、以及 app 内的线程栈都成立。
+    /// 在此之前谈 dsh 没有意义。
+    static func runProbeSynchronously(_ script: String) {
+        let out = probeResultURL
+        try? FileManager.default.removeItem(at: out)
+        // Node 往 fd 1 写；app 里那个 fd 不指向任何地方，所以先把它重定向到文件。
+        guard freopen(out.path, "w", stdout) != nil else { return }
+        defer { fflush(stdout) }
+
+        var args = ["node", "-e", script]
+        var cStrings = args.map { strdup($0) }
+        defer { cStrings.forEach { free($0) } }
+        cStrings.withUnsafeMutableBufferPointer { buf in
+            _ = dsh_node_start(Int32(args.count), buf.baseAddress)
+        }
+    }
+
     /// 在后台线程上启动 Node。重复调用是空操作。
     ///
     /// 返回 false 表示 bundle 里没有 Node 侧代码——那是打包问题，不是运行时问题，

@@ -10,6 +10,7 @@ targets:
     platform: iOS
     sources:
       - path: DshMobile
+      - path: NodeRuntime
     # xcodegen 会重新生成这个 plist，所以键必须写在这里而不是文件里
     # ——直接编辑生成出来的 Info.plist 会在下次 generate 时被静默丢弃。
     info:
@@ -42,6 +43,57 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dshmobile.shell
+        # Swift 通过它看到 dsh_node_start。
+        SWIFT_OBJC_BRIDGING_HEADER: NodeRuntime/DshMobile-Bridging-Header.h
+        # Node/V8 的 30 个静态库（gtest 与 torque 是构建期用的，没拷进来）。
+        # 它们不入库，由 vendor/build-node22-ios.sh 产出后拷到 NodeLibs/。
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/NodeLibs
+        OTHER_LDFLAGS:
+          - $(inherited)
+          # V8 与 Node 之间有环形符号依赖，静态库单遍扫描解决不了；
+          # 让链接器反复搜索，比手工排序稳。
+          - -Wl,-search_paths_first
+          - -labseil
+          - -lada
+          - -lbrotli
+          - -lcares
+          - -lcrdtp
+          - -lhistogram
+          - -lllhttp
+          - -lnbytes
+          - -lncrypto
+          - -lnghttp2
+          - -lnode
+          - -lopenssl
+          - -lsimdjson
+          - -lsimdutf
+          - -lsqlite
+          - -luv
+          - -luvwasi
+          - -lv8_base_without_compiler
+          - -lv8_compiler
+          - -lv8_init
+          - -lv8_initializers
+          - -lv8_initializers_slow
+          - -lv8_libbase
+          - -lv8_libplatform
+          - -lv8_snapshot
+          - -lv8_turboshaft
+          - -lv8_zlib
+          - -lzlib
+          - -lzlib_data_chunk_simd
+          - -lzstd
+          - -lc++
+          # CoreFoundation：abseil 的时区查询要用（就是 embedtest 链不上的那个）。
+          # 其余是 Node 在 Apple 平台的常规依赖。
+          - -framework
+          - CoreFoundation
+          - -framework
+          - Security
+          - -framework
+          - SystemConfiguration
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"

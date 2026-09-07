@@ -551,3 +551,20 @@ Unicode 属性转义（`\p{XID_Start}`、`\p{L}`、`\p{N}`）依赖 V8 的
 
 顺带一提，node-pty 在设备上找的是 `prebuilds/ios-arm64/pty.node`——
 说明 Node 正确地把自己认成了 `ios` 平台。
+
+### small-icu 重编的结果
+
+37 个静态库（比 none 那版多 4 个），共 131 MB：
+
+```
+libicui18n.a   4.8M
+libicudata.a   3.7M
+libicuucx.a    2.6M
+libicustubdata.a
+```
+
+`make` 仍以非零退出，仍然只卡在链接 `embedtest`（CoreFoundation）——
+与上一版相同，不影响静态库。**再次印证：判断这套构建成功与否要看
+`out/Release/*.a`，不是 make 的退出码。**
+
+app 重新链接一次通过（34 个库）。

@@ -10,9 +10,12 @@ import Foundation
 enum HarnessEndpoint {
     private static let key = "HarnessURL"
 
-    /// 模拟器与宿主共享网络栈，所以这个默认值在模拟器上直接可用；真机上必然连不通，
-    /// 会落到设置界面。
-    static let fallback = URL(string: "http://127.0.0.1:7799")!
+    /// **设备内 runtime 已就位**：默认就是 app 自己那个 Node 线程监听的
+    /// loopback 端口，不需要 Mac、不需要局域网、不需要填地址。
+    ///
+    /// 手填地址的入口保留着（摇一摇 / `dshmobile://settings`），因为它仍然有用：
+    /// 开发时可以把界面指向 Mac 上跑的 host，省掉重新打包 315MB 的 app。
+    static let fallback = URL(string: "http://127.0.0.1:\(NodeHost.port)")!
 
     static var current: URL {
         // 启动参数优先，便于在 Xcode / xcrun 里指定而不动持久化的值。

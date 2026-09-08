@@ -29,6 +29,9 @@ final class HarnessViewController: UIViewController {
     /// 只主动弹一次设置，之后由用户点"改地址"或摇一摇——
     /// 否则重试失败会把设置界面反复推上来，连"重试"都点不着。
     private var hasOfferedSettings = false
+    /// 这一版是否带了设备内 runtime。影响连不上时的提示措辞——
+    /// "host 还没起来" 和 "Mac 上没开 host" 是两回事，混在一起会让人查错方向。
+    private var hasEmbeddedRuntime = false
 
     /// 摇一摇叫出连接设置。真机上这是**已经连上之后**改地址的唯一入口——
     /// 界面整个被 WebView 占满，没有别的地方放这个入口；而换 Mac、换网段
@@ -97,9 +100,10 @@ final class HarnessViewController: UIViewController {
 
         // 设备内 runtime 的最小验证：先确认 Node 能起来，再谈别的。
         // 结果写进 Documents，用 devicectl 取回。
-        // 检查点 4.2：设备上逐包 import 那 83 个 dsh 包。
-        // 结果写进 Documents，用 devicectl copy from 取回。
-        Thread { NodeHost.runImportProbe() }.start()
+        // 设备内 runtime：在后台线程上起 dsh 的 host，监听 app 自己的 loopback。
+        // 返回 false 表示这一版没带 Node 侧代码（打包问题），此时才回落到
+        // 手填地址那条路。
+        hasEmbeddedRuntime = NodeHost.startIfAvailable()
 
         load()
     }
@@ -191,10 +195,11 @@ extension HarnessViewController: WKNavigationDelegate {
 
         \(error.localizedDescription)
 
-        这一版的 runtime 还在 Mac 上。真机要填 Mac 的**局域网**地址——
-        默认的 127.0.0.1 在手机上指的是手机自己。
+        \(hasEmbeddedRuntime
+          ? "设备内的 dsh 还没起来。它在后台线程启动，冷启动要几秒——先点重试。"
+          : "这一版没带设备内 runtime，得填 Mac 上 host 的局域网地址。")
 
-        （连上之后想改地址：摇一摇。）
+        （想改地址：摇一摇，或打开 dshmobile://settings）
         """
 
         // 首次失败直接把设置推到脸上：真机上这一步是必然会遇到的，

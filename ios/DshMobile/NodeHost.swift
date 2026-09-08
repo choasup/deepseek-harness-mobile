@@ -36,6 +36,14 @@ enum NodeHost {
     /// 探针结果落盘的位置。放 Documents 是为了能用
     /// `xcrun devicectl device copy from` 取回来——设备上没有终端，
     /// 而 Node 的 stdout 在 app 里默认哪儿都不去。
+    /// dsh host 的日志。**没有这个就等于瞎排查**：设备上没有终端，Node 的
+    /// stdout/stderr 在 app 里默认不指向任何地方，host 起没起来、为什么没起来，
+    /// 一个字都看不到。
+    static var hostLogURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("dsh-host.log")
+    }
+
     static var probeResultURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("node-probe.json")
@@ -87,7 +95,25 @@ enum NodeHost {
         guard thread == nil else { return true }
         guard let root = projectRoot else { return false }
 
-        try? FileManager.default.createDirectory(at: dshHome, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dshHome, withIntermediateDirectories: true)
+
+        // profile 目录要可写（dsh 会在里面放 storages 等），而 bundle 是只读的，
+        // 所以把它从 bundle 拷到 DSH_HOME 下。node_modules 留在 bundle 里不动
+        // ——那部分只读就够，而且有几百 MB，拷一份是浪费。
+        let profiles = dshHome.appendingPathComponent("profiles/mobile-web", isDirectory: true)
+        if !fm.fileExists(atPath: profiles.path) {
+            try? fm.createDirectory(at: profiles, withIntermediateDirectories: true)
+            let src = root.appendingPathComponent("profiles/mobile-web")
+            for name in ["package.json", "cordis.patch.yml"] {
+                try? fm.copyItem(at: src.appendingPathComponent(name),
+                                 to: profiles.appendingPathComponent(name))
+            }
+            // profile 靠这个符号链接找到 bundle 里的 node_modules。
+            try? fm.createSymbolicLink(at: profiles.appendingPathComponent("node_modules"),
+                                       withDestinationURL: root.appendingPathComponent("node_modules"))
+        }
+
         setenv("DSH_HOME", dshHome.path, 1)
         // dsh 的工作区默认取 cwd；bundle 只读，指到可写目录去。
         setenv("DSH_CWD", dshHome.path, 1)
@@ -101,6 +127,13 @@ enum NodeHost {
         ]
 
         let t = Thread {
+            // stdout 与 stderr 都重定向到日志文件，理由见 hostLogURL。
+            let log = hostLogURL
+            try? FileManager.default.removeItem(at: log)
+            freopen(log.path, "w", stdout)
+            freopen(log.path, "a", stderr)
+            setvbuf(stdout, nil, _IOLBF, 0)   // 行缓冲，崩溃时也能留下已写的部分
+
             // argv 必须在 node::Start 的整个生命周期内有效，所以在这里持有它，
             // 不要用会被回收的临时缓冲。
             var cStrings = args.map { strdup($0) }

@@ -77,6 +77,31 @@ final class HarnessViewController: UIViewController {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.preferredContentMode = .mobile
+
+        // 触屏点击后 WebKit 会把 :hover **留在**被点的元素上——没有
+        // “移开指针”这个动作。桌面版据此显示的悬停提示（“发送消息”那类）
+        // 于是赖在屏幕上挡住内容，怎么点都不消失。
+        //
+        // 用脚本从源头清掉，而不是用 CSS 去猜 tooltip 的类名：dsh 的类名是
+        // CSS-module 哈希、每次构建都变，实测那个元素还只在特定条件下入 DOM，
+        // 根本没法可靠命中。这段不依赖任何标记结构。
+        config.userContentController.addUserScript(WKUserScript(
+            source: """
+            document.addEventListener('touchend', (event) => {
+              // 沿祖先链逐个补发离开事件——hover 状态是逐层附着的。
+              let node = event.target
+              while (node && node !== document) {
+                for (const type of ['pointerleave', 'pointerout', 'mouseleave', 'mouseout']) {
+                  const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent
+                  node.dispatchEvent(new Ctor(type, { bubbles: false, cancelable: true }))
+                }
+                node = node.parentElement
+              }
+            }, { passive: true, capture: true })
+            """,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true,
+        ))
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false

@@ -51,12 +51,18 @@ function call(path, body, query) {
           resolve({
             status: res.statusCode,
             contentType: res.headers['content-type'] ?? '',
+            headers: res.headers,
             body: Buffer.concat(chunks),
           }),
         )
       },
     )
-    req.on('error', reject)
+    req.on('error', (err) => {
+      // 桥的失败会被附件服务换成一句无关的 "Unsupported or malformed image
+      // data"，真因只在 cause 里、没人显示。所以在这里就记下来。
+      console.log(`[sharp-bridge] ${url.pathname} 请求失败: ${err.code ?? ''} ${err.message}`)
+      reject(err)
+    })
     req.end(body)
   })
 }
@@ -93,6 +99,19 @@ class Pipeline {
     return this
   }
 
+  /**
+   * 输出原始 RGBA 像素而不是编码后的图。
+   *
+   * **这个方法不是可选的**：附件服务的 `hasLowColourCount` 在**每次存图**时
+   * 都会走 `.resize(...).raw().toBuffer({ resolveWithObject: true })`。
+   * 少了它，`.raw()` 返回 undefined、下一步 TypeError，而上游会把它换成
+   * "Unsupported or malformed image data"——一句与真因毫无关系的错误。
+   * 相机功能连续四次失败，根因就是这里。
+   */
+  raw() {
+    return new Pipeline(this._input, { ...this._ops, format: 'raw' })
+  }
+
   jpeg(options) {
     const quality = options?.quality
     return new Pipeline(this._input, {
@@ -115,6 +134,16 @@ class Pipeline {
     const result = await call('/image/metadata', this._input)
     if (result.status !== 200) throw bridgeError(result, '读取图像元数据')
     const meta = JSON.parse(result.body.toString('utf8'))
+    // 附件服务只认 png/jpeg/webp/gif；format 落在这之外时它抛的是
+    // "Unsupported or malformed image data"，**完全不提是什么格式**。
+    // 所以在这里把真实值记下来，否则只能靠猜。
+    if (!['png', 'jpeg', 'webp', 'gif'].includes(meta.format)) {
+      console.error(
+        `[sharp-bridge] 原生侧识别出的格式是 "${meta.format}"，` +
+          `（原始 UTI "${meta.uti}"）不在附件服务接受的 png/jpeg/webp/gif 之内；` +
+          `输入 ${this._input.length} 字节，前 4 字节 ${this._input.subarray(0, 4).toString('hex')}`,
+      )
+    }
     return {
       format: meta.format,
       width: meta.width,
@@ -126,6 +155,19 @@ class Pipeline {
   }
 
   async toBuffer(options) {
+    if (this._ops.format === 'raw') {
+      const result = await call('/image/raw', this._input, { maxDim: this._ops.maxDim })
+      if (result.status !== 200) throw bridgeError(result, '解码原始像素')
+      // 宽高与通道数不在字节流里，靠响应头带回来。
+      const info = {
+        width: Number(result.headers['x-image-width'] ?? 0),
+        height: Number(result.headers['x-image-height'] ?? 0),
+        channels: Number(result.headers['x-image-channels'] ?? 4),
+        size: result.body.length,
+      }
+      return options?.resolveWithObject ? { data: result.body, info } : result.body
+    }
+
     const result = await call('/image/normalize', this._input, {
       maxDim: this._ops.maxDim,
       quality: this._ops.quality,

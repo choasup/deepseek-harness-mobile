@@ -72,5 +72,64 @@ console.log(
     `(stub=${globalThis.WebAssembly?.__dshMobileStub === true}) fetch-swapped=${swapped}`,
 )
 
+// ── 第二步半：原生桥自检 ─────────────────────────────────────────────
+//
+// 为什么要有这个：附件服务对**任何**图像错误都抛同一句
+// "Unsupported or malformed image data"，真实原因被塞进 cause 而不显示。
+// 于是桥一旦有问题，症状是一句与真因无关的话，只能靠用户反复拍照来试。
+//
+// 自检把这条链在启动时就走一遍（1×1 的 PNG，几十字节），成败都写进日志。
+// 用户不必再当测试员。
+if (process.env.DSH_NATIVE_BRIDGE) {
+  const PNG_1X1 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  try {
+    const sharp = (await import('./node_modules/sharp/index.cjs')).default
+    const meta = await sharp(PNG_1X1).metadata()
+    console.log(`[bridge-selftest] metadata ok: ${JSON.stringify(meta)}`)
+    const out = await sharp(PNG_1X1).resize(64).jpeg({ quality: 80 }).toBuffer()
+    console.log(`[bridge-selftest] normalize ok: ${out.length} 字节`)
+
+    // raw 路径：附件服务每次存图都会走它（hasLowColourCount），
+    // 而它正是相机连续四次失败的根因——上一版自检没覆盖到，所以没测出来。
+    const rawOut = await sharp(PNG_1X1).clone().resize({ width: 64, height: 64 }).raw()
+      .toBuffer({ resolveWithObject: true })
+    console.log(`[bridge-selftest] raw ok: ${rawOut.data.length} 字节 info=${JSON.stringify(rawOut.info)}`)
+
+    // 大 body 专项：相机照片是几百 KB，而上面那张 PNG 只有几十字节。
+    // 相机路由（空 body）是通的、metadata（小 body）也是通的，唯独真实照片失败
+    // ——差别就在体积，所以这里单独把传输层压一遍。
+    // 这里**不关心它是不是合法图像**：只要拿回任何 HTTP 状态码，就说明
+    // 请求体被完整收下了；连接层面出错才是我们要找的问题。
+    for (const size of [64 * 1024, 256 * 1024, 1024 * 1024]) {
+      try {
+        const http = await import('node:http')
+        const payload = Buffer.alloc(size, 0x41)
+        const status = await new Promise((resolve, reject) => {
+          const req = http.request(
+            new URL('/image/metadata', process.env.DSH_NATIVE_BRIDGE),
+            { method: 'POST', headers: { 'content-length': payload.length } },
+            (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)) },
+          )
+          req.on('error', reject)
+          req.setTimeout(10_000, () => req.destroy(new Error('超时')))
+          req.end(payload)
+        })
+        console.log(`[bridge-selftest] ${size / 1024}KB body → HTTP ${status}（传输正常）`)
+      } catch (error) {
+        console.log(`[bridge-selftest] ${size / 1024}KB body → 失败: ${error?.code ?? ''} ${error?.message}`)
+      }
+    }
+  } catch (error) {
+    // 打完整信息：message 往往不够，桥的失败常常在 code/errno 上
+    console.log(
+      `[bridge-selftest] 失败: ${error?.name} ${error?.message} ` +
+        `code=${error?.code} errno=${error?.errno} cause=${error?.cause?.message ?? ''}`,
+    )
+  }
+}
+
 // ── 第三步：进 dsh ───────────────────────────────────────────────────
 await import('./node_modules/@deepseek-ai/dsh/lib/bin.js')

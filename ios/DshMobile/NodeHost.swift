@@ -50,6 +50,10 @@ enum NodeHost {
             )
         }
 
+        bridge.register("POST /image/raw") { body, query in
+            ImageOps.raw(body, maxDim: Int(query["maxDim"] ?? "") ?? 0)
+        }
+
         // 相机是异步且可能被用户取消的，而桥的路由是同步返回。
         // 用信号量把它转成同步：这条请求本来就该一直等到用户拍完或取消
         // ——超时会让"用户正在取景"变成一次失败。

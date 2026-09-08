@@ -139,6 +139,8 @@ struct BridgeResponse {
     var status: Int
     var contentType = "application/octet-stream"
     var body: Data
+    /// 附加响应头。原始像素需要把宽高与通道数带回去——它们不在字节流里。
+    var headers: [String: String] = [:]
 
     static func json(_ object: [String: Any], status: Int = 200) -> BridgeResponse {
         let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
@@ -150,13 +152,12 @@ struct BridgeResponse {
     }
 
     func serialized() -> Data {
-        var out = Data("""
-        HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r
-        Content-Type: \(contentType)\r
-        Content-Length: \(body.count)\r
-        Connection: close\r
-        \r\n
-        """.utf8)
+        var head = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\n"
+        head += "Content-Type: \(contentType)\r\n"
+        head += "Content-Length: \(body.count)\r\n"
+        for (name, value) in headers { head += "\(name): \(value)\r\n" }
+        head += "Connection: close\r\n\r\n"
+        var out = Data(head.utf8)
         out.append(body)
         return out
     }

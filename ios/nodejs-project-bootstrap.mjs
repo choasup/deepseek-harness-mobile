@@ -98,6 +98,14 @@ if (process.env.DSH_NATIVE_BRIDGE) {
       .toBuffer({ resolveWithObject: true })
     console.log(`[bridge-selftest] raw ok: ${rawOut.data.length} 字节 info=${JSON.stringify(rawOut.info)}`)
 
+    // 按附件服务的**真实调用链**走一遍，而不是挑几个方法测。
+    // 前两版自检就是因为只测了自己想到的方法（metadata/normalize），
+    // 漏掉 raw、又漏掉 toColourspace，每漏一个就是一轮设备往返。
+    const chain = await sharp(PNG_1X1).rotate().toColourspace('srgb')
+      .clone().resize({ width: 64, height: 64 }).raw()
+      .toBuffer({ resolveWithObject: true })
+    console.log(`[bridge-selftest] 附件链路 ok: ${chain.data.length} 字节`)
+
     // 大 body 专项：相机照片是几百 KB，而上面那张 PNG 只有几十字节。
     // 相机路由（空 body）是通的、metadata（小 body）也是通的，唯独真实照片失败
     // ——差别就在体积，所以这里单独把传输层压一遍。

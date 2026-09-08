@@ -130,6 +130,35 @@ class Pipeline {
     return this.jpeg(options)
   }
 
+  /**
+   * 色彩空间转换。原生侧的 CGContext 用的就是 DeviceRGB，输出本来就是 8 位
+   * sRGB，所以这里只需保持链式、不做额外处理。
+   *
+   * **但不能不实现**：附件服务在归一化前会走
+   * `sharp(data).rotate().toColourspace("srgb")`，缺了它返回 undefined、
+   * 下一步 TypeError，而上游会把它换成
+   * "The undefined JPEG could not be converted to the normalized 8-bit sRGB form"
+   * ——一句指向色彩空间、实则与色彩空间无关的错误。
+   */
+  toColourspace() {
+    return this
+  }
+
+  /** 英式拼写的别名，sharp 两个都提供。 */
+  toColorspace() {
+    return this
+  }
+
+  /**
+   * 裁掉边缘同色区域。原生侧没实现，**原样返回**而不是抛错。
+   *
+   * 这是有意的取舍：trim 是"锦上添花"的优化（去掉截图白边），跳过它只会让
+   * 图片略大一点，而抛错会让整张图存不进去。宁可少一个优化，不要断一条主路。
+   */
+  trim() {
+    return this
+  }
+
   async metadata() {
     const result = await call('/image/metadata', this._input)
     if (result.status !== 200) throw bridgeError(result, '读取图像元数据')
@@ -188,11 +217,44 @@ class Pipeline {
   }
 }
 
+/**
+ * 未实现的方法要**报出自己的名字**。
+ *
+ * 不加这层兜底时，缺一个方法的表现是"返回 undefined → 下一步 TypeError →
+ * 被上游换成一句与真因无关的错误"。相机功能为此连续失败五次，每次都要
+ * 一轮设备往返才定位一个方法。有了它，第一次就知道缺谁。
+ */
+function wrap(pipeline) {
+  return new Proxy(pipeline, {
+    get(target, prop, receiver) {
+      const existing = Reflect.get(target, prop, receiver)
+      if (typeof existing === 'function') {
+        // 链式方法返回的仍是 Pipeline，要再包一层，否则代理只护住第一跳。
+        return (...args) => {
+          const out = existing.apply(target, args)
+          return out instanceof Pipeline ? wrap(out) : out
+        }
+      }
+      if (existing !== undefined || typeof prop !== 'string') return existing
+      // Promise 解包、console.log 等会探测这些，不能当成"缺方法"。
+      if (['then', 'catch', 'finally', 'toJSON', 'constructor'].includes(prop)) return undefined
+      if (typeof prop === 'symbol') return undefined
+      return () => {
+        throw new Error(
+          `iOS 的图像桥没有实现 sharp 的 .${prop}()。` +
+            '要么在 tools/sharp-bridge/index.cjs 里补上，' +
+            '要么确认调用方为什么走到了这条路径。',
+        )
+      }
+    },
+  })
+}
+
 function sharp(input) {
   if (!Buffer.isBuffer(input)) {
     throw new Error('iOS 的图像桥只接受 Buffer 输入')
   }
-  return new Pipeline(input)
+  return wrap(new Pipeline(input))
 }
 
 sharp.kernel = Object.freeze({

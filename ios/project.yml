@@ -32,14 +32,21 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        # host 是明文 HTTP。模拟器上是 loopback，真机上是用户填的局域网地址
-        # （192.168.x.x 这类）——**NSAllowsLocalNetworking 覆盖不到它**，
-        # 那个键只放行无限定主机名、.local 和链路本地地址（169.254/16、fe80::/10）。
-        # 所以真机要连 Mac 就只能开 NSAllowsArbitraryLoads。
+        # host 是明文 HTTP。
         #
-        # 权衡说清楚：这个 app 只加载**用户自己填的那一个** URL，不加载别的任何
-        # 远端资源，所以放开的面就是那一个地址。设备内 runtime 落地后地址回到
-        # app 自己的 loopback，这一条就该删掉。
+        # 当初真机要连 Mac 上的 host（192.168.x.x），而
+        # **NSAllowsLocalNetworking 覆盖不到那类地址**——那个键只放行无限定
+        # 主机名、.local 和链路本地地址（169.254/16、fe80::/10），所以只能开
+        # NSAllowsArbitraryLoads。
+        #
+        # **这个前提已经不成立了**：runtime 现在跑在设备内，正常路径连的是
+        # app 自己的 127.0.0.1:47799。还留着它的唯一原因是 HarnessEndpoint
+        # 里那个开发用的地址覆盖（可以指向局域网）。
+        #
+        # 该删，但**要在真机上验过再删**：ATS 对 loopback 的豁免在各 iOS 版本
+        # 上的说法并不一致，删错了症状是 app 整个白屏、且看不出是 ATS 拦的。
+        # 顺序应该是：先去掉 → 装真机 → 确认 WebView 能加载 → 再一并去掉
+        # HarnessEndpoint 的局域网覆盖。
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
@@ -130,11 +137,12 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         # 真机要签名。这里是 Xcode 里登录的那个账号的 team，**不是**钥匙串里
         # 证书的 team——这台机器上两者不同：钥匙串有一张机构证书
-        # (3L724S787J)，但 Xcode 登录的是免费个人 team (4752F9442A)。
+        # (3L724S787J)，但 Xcode 登录的是付费个人账号 (4752F9442A)。
         # 填错的报错是 `No Account for Team "…"`，看着像"没登录"，
         # 实际是"登录的账号没有这个 team"。
         # 查法：plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep teamID
         #
-        # 免费个人 team 的限制：签出来的 app **7 天后过期**，到期要重装。
+        # 这个 team 已入 Apple Developer Program（isFreeProvisioningTeam: false），
+        # 所以签出来的 app 没有免费账号那个 7 天过期限制，TestFlight 也可用。
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 4752F9442A

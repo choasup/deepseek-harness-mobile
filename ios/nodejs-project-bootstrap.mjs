@@ -139,5 +139,36 @@ if (process.env.DSH_NATIVE_BRIDGE) {
   }
 }
 
+// ── 第二步又三分之一：fetch 中断语义自检 ─────────────────────────────
+//
+// 规范要求被 AbortSignal 中断的 fetch 以 **AbortError** 失败。dsh 靠
+// `error.name === 'AbortError'` 区分"用户取消"与"网络故障"；传成普通 Error
+// 时，用户按"停止生成"会被当成网络失败——界面弹 Load failed，生成也停不下来。
+//
+// 这条**必须测流开始之后的中断**，不能只测发出前——两者走的是不同分支，
+// 而真实场景是前者。这一课已经交过两次学费（raw、toColourspace）。
+{
+  const http = await import('node:http')
+  const server = http.createServer((_q, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const timer = setInterval(() => res.write('data: x\n\n'), 40)
+    res.on('close', () => clearInterval(timer))
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const controller = new AbortController()
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/`, { signal: controller.signal })
+    const reader = res.body.getReader()
+    await reader.read()
+    controller.abort()
+    await reader.read()
+    console.log('[bridge-selftest] abort 语义: 未抛错（不对）')
+  } catch (error) {
+    const ok = error?.name === 'AbortError'
+    console.log(`[bridge-selftest] abort 语义: ${error?.name} ${ok ? 'ok' : '← 应为 AbortError'}`)
+  }
+  server.close()
+}
+
 // ── 第三步：进 dsh ───────────────────────────────────────────────────
 await import('./node_modules/@deepseek-ai/dsh/lib/bin.js')

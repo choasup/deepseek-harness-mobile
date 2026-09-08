@@ -37,6 +37,19 @@ async function nodeFetch(input, init) {
   return send(request, bodyBytes, 0)
 }
 
+/**
+ * 规范要求：被 AbortSignal 中断时，fetch 必须以 **AbortError** 失败。
+ *
+ * 这不是细节。dsh 和绝大多数代码都靠 `error.name === 'AbortError'` 区分
+ * "用户主动取消" 与 "网络故障"：前者安静收尾，后者要报错甚至重试。
+ * node:http 在 abort 时抛的是普通 Error（ECONNRESET / aborted），照传出去
+ * 的话，用户按下"停止生成"会被当成网络失败——界面弹 "Load failed
+ * (internal)"，而生成停不下来。实测就是这个现象。
+ */
+function abortReason(signal) {
+  return signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError')
+}
+
 function send(request, bodyBytes, redirectCount) {
   return new Promise((resolve, reject) => {
     const url = new URL(request.url)
@@ -52,6 +65,13 @@ function send(request, bodyBytes, redirectCount) {
       url,
       { method: request.method, headers, signal: request.signal ?? undefined },
       (res) => {
+        // 流已经开始之后再中断（"停止生成"的真实场景）：必须把中断原因带进
+        // 响应流，否则读取方拿到的是连接重置，而不是"这是一次取消"。
+        request.signal?.addEventListener(
+          'abort',
+          () => res.destroy(abortReason(request.signal)),
+          { once: true },
+        )
         const status = res.statusCode ?? 0
         // 跳转：fetch 的默认 redirect 模式是 follow。
         if (
@@ -89,7 +109,10 @@ function send(request, bodyBytes, redirectCount) {
       },
     )
 
-    req.on('error', (err) => reject(err))
+    req.on('error', (err) => {
+      // 中断导致的错误要还原成 AbortError；其余错误原样传出。
+      reject(request.signal?.aborted === true ? abortReason(request.signal) : err)
+    })
     if (bodyBytes) req.write(bodyBytes)
     req.end()
   })

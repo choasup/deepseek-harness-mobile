@@ -76,6 +76,7 @@ npm install --omit=dev --no-audit --no-fund \
   "$REPO/packages/shell-ssh" \
   "$REPO/packages/tool-fs-search" \
   "$REPO/packages/tool-camera" \
+  "$REPO/packages/tool-sensors" \
   "$REPO/packages/client-ui-layout-mobile"
 
 # npm 对本地 file: 依赖建的是**符号链接**，指向仓库里的源码目录——即逃出了
@@ -96,7 +97,7 @@ cp "$REPO/tools/bridge-selftest.mjs" .
 cp "$REPO/ios/nodejs-project-bootstrap.mjs" ./bootstrap.mjs 2>/dev/null || true
 
 echo "== 把逃出 bundle 的符号链接换成实体拷贝 =="
-for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera client-ui-layout-mobile; do
+for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera tool-sensors client-ui-layout-mobile; do
   L="node_modules/@dsh-mobile/$p"
   [ -L "$L" ] || continue
   rm "$L" && mkdir -p "$L"

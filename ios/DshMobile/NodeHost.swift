@@ -64,6 +64,17 @@ enum NodeHost {
             ImageOps.capabilities()
         }
 
+        // 传感器。inventory 只列清单、不读数也不弹权限框；read 才真的采样。
+        // 分成两条是因为"有哪些传感器"这个问题本身就该能便宜地回答——
+        // 让模型为了回答它去挨个采样一遍是荒唐的。
+        bridge.register("POST /sensors/inventory") { _, _ in
+            SensorBridge.inventory()
+        }
+
+        bridge.register("POST /sensors/read") { _, query in
+            SensorBridge.read(kinds: query["kinds"] ?? "")
+        }
+
         // 相机是异步且可能被用户取消的，而桥的路由是同步返回。
         // 用信号量把它转成同步：这条请求本来就该一直等到用户拍完或取消
         // ——超时会让"用户正在取景"变成一次失败。

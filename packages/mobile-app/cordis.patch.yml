@@ -260,6 +260,19 @@
     - id: tool-camera
       name: '@dsh-mobile/tool-camera'
 
+    # list_device_sensors / read_device_sensors：把手机的传感器交给模型。
+    #
+    # 「手机是大脑和感官」里，此前"感官"只有相机。被问到"你能感知到手机上有
+    # 哪些传感器"时模型答的是"感知不到，我运行在文件沙盒里"——那句话本身没错，
+    # Node 侧确实没有硬件接口，缺的是桥。
+    #
+    # 分成两个工具：列清单不采样、不弹权限框、不耗电；读数才真的采样。
+    # 定位不在默认读取的集合里，要模型显式点名（那一步会弹系统授权框）。
+    # 与 tool-camera 一样，没有 DSH_NATIVE_BRIDGE 时插件不注册工具，
+    # 所以这一行在 Mac 上也能安全加载。
+    - id: tool-sensors
+      name: '@dsh-mobile/tool-sensors'
+
     - id: tool-fs-search-js
       name: '@dsh-mobile/tool-fs-search/plugin'
 

@@ -170,6 +170,66 @@ const CSS = `
 }
 .dshm-overlay > * { pointer-events: auto; }
 
+/* ── 设置对话框的窄屏降级 ────────────────────────────────────────────
+   dsh 的设置面板是桌面版两栏：左侧 nav + 右侧内容。在 375px 宽的手机上
+   nav 独占 188px，内容只剩 127px——文字变成一个字一行。
+
+   **选择器刻意用结构而不是类名**：那些类名是 CSS-module 哈希
+   （VOzbGW_panel 这种），dsh 每次重新构建都会变。而
+   [role=dialog] > nav 这种结构关系稳定得多。代价是万一 dsh 改了 DOM 结构
+   这段会静默失效（回到挤压的样子，不会坏），可以接受。
+
+   只在窄屏生效，桌面完全不受影响。 */
+@media (max-width: 640px) {
+  [role='dialog'] {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    flex-direction: column !important;
+  }
+
+  /* 左栏变成顶部的横向标签条 */
+  [role='dialog'] > nav {
+    width: 100% !important;
+    flex: none !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--dsw-alias-border-l1);
+    padding-bottom: 4px;
+  }
+  [role='dialog'] > nav > div:last-child {
+    display: flex !important;
+    flex-direction: row !important;
+    overflow-x: auto !important;
+    gap: 4px;
+    /* 手机上横滑时不要出现滚动条占位 */
+    scrollbar-width: none;
+  }
+  [role='dialog'] > nav > div:last-child::-webkit-scrollbar { display: none; }
+  [role='dialog'] > nav button {
+    width: auto !important;
+    flex: 0 0 auto !important;
+    white-space: nowrap !important;
+    /* 44pt 触控目标 */
+    min-height: 44px;
+  }
+
+  /* 右栏吃满剩余宽度——这一条是"一个字一行"的正解 */
+  [role='dialog'] > div {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex: 1 1 auto !important;
+    overflow-y: auto !important;
+  }
+  /* 面板内的行在窄屏下从"标签｜控件"并排改成上下堆叠，
+     否则标签被挤成竖排。 */
+  [role='dialog'] label,
+  [role='dialog'] [class*='row'] {
+    min-width: 0 !important;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .dshm-drawer, .dshm-sheet, .dshm-scrim { transition: none; }
 }

@@ -101,26 +101,49 @@ enum NodeHost {
         // profile 目录要可写（dsh 会在里面放 storages 等），而 bundle 是只读的，
         // 所以把它从 bundle 拷到 DSH_HOME 下。node_modules 留在 bundle 里不动
         // ——那部分只读就够，而且有几百 MB，拷一份是浪费。
+        //
+        // **每次启动都重建**，不能"存在就跳过"。踩过：app bundle 的路径里带一个
+        // 每次安装都会变的 UUID（/var/containers/Bundle/Application/<UUID>/），
+        // 而下面那个 node_modules 符号链接指向的正是这个路径。只建一次的话，
+        // 重装之后 profile 仍指向旧 bundle，dsh 读到的是**上一个版本的
+        // cordis.patch.yml**——改了补丁却毫无效果，而且看不出原因。
+        //
+        // 重建的代价是两个小文件加一个符号链接，可以忽略。
         let profiles = dshHome.appendingPathComponent("profiles/mobile-web", isDirectory: true)
-        if !fm.fileExists(atPath: profiles.path) {
-            try? fm.createDirectory(at: profiles, withIntermediateDirectories: true)
-            let src = root.appendingPathComponent("profiles/mobile-web")
-            for name in ["package.json", "cordis.patch.yml"] {
-                try? fm.copyItem(at: src.appendingPathComponent(name),
-                                 to: profiles.appendingPathComponent(name))
-            }
-            // profile 靠这个符号链接找到 bundle 里的 node_modules。
-            try? fm.createSymbolicLink(at: profiles.appendingPathComponent("node_modules"),
-                                       withDestinationURL: root.appendingPathComponent("node_modules"))
+        try? fm.removeItem(at: profiles)
+        try? fm.createDirectory(at: profiles, withIntermediateDirectories: true)
+        let src = root.appendingPathComponent("profiles/mobile-web")
+        for name in ["package.json", "cordis.patch.yml"] {
+            try? fm.copyItem(at: src.appendingPathComponent(name),
+                             to: profiles.appendingPathComponent(name))
         }
+        // profile 靠这个符号链接找到 bundle 里的 node_modules（几百 MB，只读，
+        // 不拷贝）。
+        try? fm.createSymbolicLink(at: profiles.appendingPathComponent("node_modules"),
+                                   withDestinationURL: root.appendingPathComponent("node_modules"))
 
         setenv("DSH_HOME", dshHome.path, 1)
         // dsh 的工作区默认取 cwd；bundle 只读，指到可写目录去。
         setenv("DSH_CWD", dshHome.path, 1)
 
-        let entry = root.appendingPathComponent("node_modules/@deepseek-ai/dsh/lib/bin.js")
+        // 走 bootstrap 而不是直接跑 bin.js：它要在任何代码碰 fetch 之前把
+        // fetch 换成不依赖 WebAssembly 的实现。理由见 bootstrap.mjs。
+        let entry = root.appendingPathComponent("bootstrap.mjs")
         let args = [
-            "node", entry.path,
+            "node",
+            // 两个理由，都不是为了开发便利：
+            //
+            // ① cordis 的 loader 要访问 Node 内部模块做解析。它有两条路：
+            //    `--expose-internals`，或原生模块 node-addon-require-builtin。
+            //    后者在 iOS 上 dlopen 不了、打包时已被剥掉，只剩这一条。
+            //    没有它 loader 会走"无 internals"的降级路径。
+            // ② HMR 条目硬性要求它，否则报
+            //    "--expose-internals is required for HMR service" 并让整棵树
+            //    装载失败。那个条目的 id 是动态哈希，用补丁按 id 关不掉。
+            //
+            // 代价：Node 内部模块对 app 内运行的 JS 可见。这里跑的只有 dsh 自己。
+            "--expose-internals",
+            entry.path,
             "--profile", "mobile-web",
             "--port", String(port),
             "--no-open",

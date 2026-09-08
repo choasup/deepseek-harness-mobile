@@ -88,9 +88,9 @@ const MUST_DISABLE = [
   'agent-presets',
   // 同样只在 dsh-web-app 组合里存在：桌面三栏外框，换成移动版单栏外框。
   'ui-layout',
-  // `import sharp from "sharp"` 是静态 import 且无兜底，而 sharp 是原生模块，
-  // iOS 上 dlopen 不了（WASM 变体也不行——jitless 关掉了 WebAssembly）。
-  'attachment-local',
+  // 开发期热重载。设备上 dsh 跑在只读 bundle 里，文件不会变，用不上；
+  // 而它要的 Node 内部访问依赖一个已被剥掉的原生模块。
+  'hmr',
 ]
 
 const MUST_STAY_ENABLED = [

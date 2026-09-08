@@ -310,26 +310,45 @@
 - id: agent-presets
   disabled: true
 
-# ── F'. 禁用：依赖 sharp 的附件存储 ───────────────────────────────────
+# ── F'. 附件存储：**不禁用**，改用给 sharp 打桩 ─────────────────────
 #
-# `dsh-attachment-local` 的第 8 行是 `import sharp from "sharp"`——**静态
-# import，没有兜底**。sharp 是原生模块（libvips），iOS 上 dlopen 不了；
-# 它的 WASM 变体也救不了，因为 jitless 关掉了 WebAssembly。
+# `dsh-attachment-local` 第 8 行是 `import sharp from "sharp"`——静态 import，
+# 而 sharp 是原生模块（libvips），iOS 上 dlopen 不了。
 #
-# 禁用它是安全的，已核实消费者的依赖形态：
-#   `dsh-tool-fs` 的顶层 inject 是 ["tools","fs","systemPrompt"]，**不含
-#   attachments**；它对附件用的是 `ctx.inject(['attachments'], …)` 子 fiber
-#   （其注释原话："so the tool exists only while a durable [service is
-#   present]"）。服务不在，`read_image` 工具就不注册，不会 PENDING。
+# **一开始禁用了它，那是错的**：整棵插件树因此起不来——
+#     dsh: 1 entry did not activate
+#     @deepseek-ai/dsh-host-apiproxy: pending (waiting for service: attachments)
+# `dsh-host-apiproxy`（API 网关，Web 界面的命脉）对 `attachments` 是**硬依赖**。
 #
-# **代价是实打实的**：附件存储不可用，模型看不到图片。在手机上这尤其可惜——
-# 摄像头本该是这个形态最强的输入。
+# 当初判断"禁用是安全的"，依据是查了 `dsh-tool-fs`——它确实是软依赖
+# （`ctx.inject(['attachments'], …)` 子 fiber）。**但漏了 apiproxy**：
+# 对它的 grep 返回空，我当成"没有硬依赖"，实际是匹配模式不对。
+# 教训：证明"没有消费者"要逐个确认，一次没匹配上不等于不存在。
 #
-# **出路不是把 sharp 弄上 iOS，而是绕开它**：图像归一化（缩放、编码、取
-# 元数据）在 iOS 上应该交给系统的 CoreImage / ImageIO 做，由原生侧处理完再
-# 把字节交给 Node。手机的图像 API 比 libvips 更合适，也不需要 dlopen。
-# 这属于原生桥的工作，不在这一轮范围内。
-- id: attachment-local
+# 现在的做法是让 attachment-local 正常加载，把 sharp 换成桩
+# （见 ios/nodejs-project/node_modules/sharp/stub.cjs）：import 与属性访问都
+# 正常，只有真正处理图像时才抛错。于是附件存储可用、apiproxy 能激活，
+# 只有图像归一化不可用。
+#
+# 出路仍是绕开 sharp：图像归一化交给 CoreImage/ImageIO，原生侧处理完把字节
+# 交给 Node。属于原生桥的工作。
+
+# ── F''. 禁用：HMR（开发期热重载）─────────────────────────────────────
+#
+#     failed to apply loader entry (@deepseek-ai/cordis-plugin-hmr):
+#       --expose-internals is required for HMR service
+#
+# HMR 要访问 Node 内部模块，两条路都走不通：命令行没有 `--expose-internals`，
+# 而备用的 `node-addon-require-builtin` 是**原生模块**——iOS 上 dlopen 不了，
+# 打包时已被剥掉（见 ios/prepare-nodejs-project.sh）。
+#
+# 关掉是对的，不是将就：HMR 的用途是开发时监听插件文件变化并热重载，
+# 而设备上的 dsh 跑在只读的 app bundle 里，文件根本不会变。
+# 想改代码就得重新打包安装，热重载无从谈起。
+#
+# 另一条路（给 argv 加 `--expose-internals`）故意不走：为了一个用不上的功能
+# 去打开 Node 的内部模块，代价和收益不成比例。
+- id: hmr
   disabled: true
 
 # ── G. 换掉桌面版 layout（只在叠加 dsh-web-app 时存在这一行）───────────

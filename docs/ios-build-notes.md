@@ -585,3 +585,108 @@ app 重新链接一次通过（34 个库）。
 **副作用一则**：探测输出末尾会多出两行 `0.5`——某个包在 import 时往 stdout
 打了东西，把 JSON 弄成了非法。不影响判断，但解析时要容错。设备上没有别的
 输出通道，stdout 是共享的，这类污染以后还会有。
+
+---
+
+## 检查点 5：dsh 在设备内起服务
+
+日志（`Documents/dsh-host.log`，`devicectl copy from` 取回）：
+
+```
+[bootstrap] execArgv=["--expose-internals"]
+[bootstrap] require internals: yes
+[bootstrap] WebAssembly=object(stub=true) fetch-swapped=true
+dsh web: http://127.0.0.1:47799
+```
+
+无错误。**runtime 完全在设备内**：不需要 Mac、不需要局域网、不需要填地址。
+
+到这一步又踩了五个坑，全部与 iOS/嵌入式 Node 有关：
+
+### 失败 #11：undici 的 WebAssembly（**整个项目最硬的一关**）
+
+```
+dsh: fatal load failure: ReferenceError: WebAssembly is not defined
+    at lazyllhttp (node:internal/deps/undici/undici:5827:9)
+```
+
+Node 内置的 undici（`fetch` 的实现）用 WASM 版 llhttp 解析 HTTP，而 jitless
+没有 WebAssembly。**这不是 dsh 的依赖，是 Node 自己的**，躲不开。
+
+先查过一条可能一劳永逸的路：V8 的 WASM 解释器 DrumBrake 正是为 jitless 环境
+做的——但它在 V8 13+ 才有，Node 22 的 V8 是 **12.4**。此路不通。
+
+解法分两半：
+
+**① `WebAssembly` 桩，永不 settle。** undici 那段是
+
+```js
+var llhttpPromise = lazyllhttp();   // 内部 await WebAssembly.compile(...)
+llhttpPromise.catch();              // ← 不传处理函数，等于没接住
+```
+
+`.catch()` 不带参数并不消化 rejection → unhandled rejection → 进程崩。
+所以**不能让 compile 抛错或 reject**，只能让它永远悬着。
+
+**② 把 `fetch` 换成走 `node:http`**——那用的是编译进 libnode 的 **C++ 版**
+llhttp，不需要 WASM。121 行，`--jitless` 下实测 GET/POST/SSE 流式/AbortSignal
+全通过。
+
+**顺序是死的，而且比想象中苛刻**：实测 Node 22 上 **`import 'node:http'` 本身
+就会拉起 undici**（Node 24 不会）。ESM 的静态 import 在模块代码之前求值，
+所以入口文件**不能有任何静态 import**——桩内联在最顶部，其余一律顶层 await +
+动态 import。
+
+> 这里我先在 Node 24 上做了"哪些 Web API 在 jitless 下可用"的实验，结论是
+> `Headers`/`Response`/`Request` 都安全。**那个结论在 Node 22 上不成立**——
+> 碰任意一个都会拉起 undici。又一次印证：拿别的版本的结论套自己编的 runtime，
+> 会得到看似合理、实则错误的判断。
+
+### 失败 #12：本地包的运行时依赖没进 bundle
+
+`Cannot find package 'ssh2'`。npm 对 `file:` 依赖建符号链接，解链接换成实体
+拷贝后，依赖树里就没有它们的来源了。显式装 `ssh2` 与 `tweetnacl`。
+**注意任何 `npm install` 都会把符号链接重建回来**——解链接必须是最后一步。
+
+### 失败 #13：禁用 attachment-local 让整棵树起不来
+
+```
+@deepseek-ai/dsh-host-apiproxy: pending (waiting for service: attachments)
+```
+
+`dsh-host-apiproxy`（API 网关，Web 界面的命脉）对 `attachments` 是**硬依赖**。
+当初判断"禁用是安全的"只查了 `dsh-tool-fs`（确实是软依赖），
+**对 apiproxy 的 grep 返回空就当成没有依赖——匹配模式不对**。
+教训：证明"没有消费者"要逐个确认，一次没匹配上不等于不存在。
+
+改为让 attachment-local 正常加载、把 `sharp` 换成桩：import 与属性访问都正常，
+只有真正处理图像时才抛错。
+
+### 失败 #14：profile 只建一次，指向了旧 bundle
+
+app bundle 的路径里带一个**每次安装都变**的 UUID，而 profile 里那个指向
+`node_modules` 的符号链接是首次运行时建的。于是重装之后 dsh 一直读**上一个
+版本的 cordis.patch.yml**——改了补丁毫无效果，且看不出原因。改成每次启动重建。
+
+### 失败 #15：HMR —— 错误信息指向 flag，真因是 loader 分类
+
+```
+failed to apply loader entry <hash> (@deepseek-ai/cordis-plugin-hmr):
+  --expose-internals is required for HMR service
+```
+
+条目 id 是**动态哈希**，用补丁按 id 关不掉。源头在 dsh 自己的 profile-boot：
+
+```js
+if (ctx.get("hmr") === undefined) {
+  await ctx.loader.create({ name: "@deepseek-ai/cordis-plugin-hmr", config: { root: [] } })
+}
+await watchUserPatches(ctx, ...)   // 用途：监听用户 patch 文件
+```
+
+**是"禁用 hmr 行"这个动作本身导致它去动态建一个。**
+
+而它的检查是 `if (!this.ctx.loader.internal)`——**不是查 flag，是查 loader 有没有
+分类出 Node 的内部模块加载器**，错误信息有误导性。loader 拿内部访问有两条路：
+`--expose-internals`，或原生模块 `node-addon-require-builtin`（iOS 上已被剥掉）。
+给 argv 加 `--expose-internals` 后两处一起解决。

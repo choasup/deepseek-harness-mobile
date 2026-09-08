@@ -76,6 +76,16 @@ npm install --omit=dev --no-audit --no-fund \
 #     invalid symlink at .../DshMobile.app/nodejs-project/node_modules/@dsh-mobile/mobile-app
 #     MIFileManager validateSymlinksInURLDoNotEscapeURL / InvalidSymlink
 # 换成实体拷贝。只拷 lib/ 与包元数据，src/tests/node_modules 在 bundle 里用不上。
+# 五个本地包的运行时依赖 npm 不会自动带进来（它们是 file: 依赖，解成符号链接
+# 之后依赖树里就没有来源了）。实测缺 ssh2 与 tweetnacl，表现是设备上
+# "Cannot find package 'ssh2'"——显式装。
+npm install --no-audit --no-fund ssh2@^1.17.0 tweetnacl@^1.0.3
+
+# 设备内入口：先装 fetch shim 再进 dsh。iOS 的 jitless V8 没有 WebAssembly，
+# 而 Node 内置的 undici 用 WASM 版 llhttp——不换掉，dsh 在加载期就死。
+cp "$REPO/tools/fetch-over-node-http.mjs" .
+cp "$REPO/ios/nodejs-project-bootstrap.mjs" ./bootstrap.mjs 2>/dev/null || true
+
 echo "== 把逃出 bundle 的符号链接换成实体拷贝 =="
 for p in mobile-app remote-registry shell-ssh tool-fs-search client-ui-layout-mobile; do
   L="node_modules/@dsh-mobile/$p"

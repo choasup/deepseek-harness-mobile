@@ -79,15 +79,34 @@ final class HarnessViewController: UIViewController {
         config.defaultWebpagePreferences.preferredContentMode = .mobile
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
-        webView.scrollView.keyboardDismissMode = .interactive
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.isHidden = true
+
+        // 整个窗口固定，不做原生滚动。
+        //
+        // 默认行为是：键盘弹出时 UIKit 把整个 web 内容往上顶/滚动，于是顶栏
+        // 会跑掉、页面还能橡皮筋回弹——在一个"对话 + 底部输入框"的界面里
+        // 这些都是干扰。
+        //
+        // 改成：WebView 的高度由**键盘布局引导**决定（见下面的约束），
+        // 键盘一出现视口就变矮，页面自己重新布局；输入框因此钉在键盘正上方。
+        // 滚动完全交给 web 端那个会话列表。
+        webView.scrollView.bounces = false
+        webView.scrollView.alwaysBounceVertical = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        // 不用 .interactive：那是"下拉收键盘"，会和 web 端的会话滚动抢手势。
+        webView.scrollView.keyboardDismissMode = .none
+
         view.addSubview(webView)
+        let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: view.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            // 顶部贴安全区：内容不会钻到灵动岛/状态栏底下。
+            webView.topAnchor.constraint(equalTo: guide.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            // 底部跟着键盘走。键盘收起时 keyboardLayoutGuide 退到安全区底部，
+            // 所以这一条同时覆盖了"有键盘"和"没键盘"两种情况。
+            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
         ])
     }
 
@@ -235,6 +254,8 @@ extension HarnessViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         launchView.isHidden = true
         webView.isHidden = false
+        // 页面加载完之后 WKContentView 才存在，这时候才能去掉那条辅助栏。
+        WebViewKeyboard.removeInputAccessoryBar(from: webView)
         // 成功了就清掉上一次的诊断。留着会误导——排查时看到一个陈旧文件，
         // 很容易当成本次失败的证据（我自己刚踩过这个）。
         try? FileManager.default.removeItem(at: Self.diagnosticURL)

@@ -76,6 +76,14 @@ function bridgeError(result, what) {
   return new Error(`${what}失败（HTTP ${result.status}）：${detail}`)
 }
 
+/**
+ * "这张图带 EXIF" 的标记。
+ *
+ * 上游只判断 `metadata.exif !== undefined`，不看内容；桥不把 EXIF 字节搬过来
+ * （没人要读它，搬过来只是白花一次拷贝）。用一个空 Buffer 表示"有"。
+ */
+const EXIF_PRESENT = Buffer.alloc(0)
+
 class Pipeline {
   constructor(input, ops) {
     this._input = input
@@ -87,11 +95,22 @@ class Pipeline {
     return new Pipeline(this._input, { ...this._ops })
   }
 
-  /** sharp 的 resize 有多种签名；这里取长边上限，这是附件服务实际用到的语义。 */
+  /**
+   * sharp 的 resize 有多种签名；这里取长边上限，这是附件服务实际用到的语义
+   * （它传的一律是 `fit: "inside"` + 等比的 width/height）。
+   *
+   * `kernel: "nearest"` 要**原样带到原生侧**，不能忽略：附件服务数颜色时用的
+   * 就是它，而平滑重采样会把一张噪声照片平均成一片灰、颜色数掉到个位数，
+   * 于是照片被判成"少色截图"改用 PNG 编码——280KB 的 JPEG 变成 1.2MB 的 PNG。
+   */
   resize(width, height, options) {
     const opts = typeof width === 'object' && width !== null ? width : { width, height, ...options }
     const longest = Math.max(opts.width ?? 0, opts.height ?? 0)
-    return new Pipeline(this._input, { ...this._ops, maxDim: longest || this._ops.maxDim })
+    return new Pipeline(this._input, {
+      ...this._ops,
+      maxDim: longest || this._ops.maxDim,
+      nearest: opts.kernel === 'nearest',
+    })
   }
 
   /** EXIF 方向由原生侧在降采样时一并处理，这里只需保持链式。 */
@@ -125,9 +144,23 @@ class Pipeline {
     return new Pipeline(this._input, { ...this._ops, format: 'png' })
   }
 
-  /** iOS 的 ImageIO 不写 WebP，退回 JPEG——**有意的降级**，不是遗漏。 */
+  /**
+   * WebP 输出。
+   *
+   * **不能偷偷退回 JPEG。** 上游 `encode()` 用调用方请求的 media type 给结果
+   * 打标签，然后 `verifyNormalizedImage` 重新解码、比对 `detected.mediaType
+   * !== image.mediaType`——退回 JPEG 就是"标着 webp 的 JPEG 字节"，必然判负，
+   * 而报出来的还是那句和真因无关的 "Unsupported or malformed image data"。
+   *
+   * 所以这里如实请求 webp；原生侧编不了就返回 501，错误里直接说清楚。
+   */
   webp(options) {
-    return this.jpeg(options)
+    const quality = options?.quality
+    return new Pipeline(this._input, {
+      ...this._ops,
+      format: 'webp',
+      quality: quality ? quality / 100 : this._ops.quality,
+    })
   }
 
   /**
@@ -159,6 +192,16 @@ class Pipeline {
     return this
   }
 
+  /**
+   * 元数据。**字段不是"顺手多报"，是上游的硬性契约。**
+   *
+   * dsh 的 `verifyNormalizedImage` 会把刚编码出来的字节重新解码，逐项比对
+   * media type、宽、高、`depth === "uchar"`、`space === "srgb"`、单帧、
+   * 以及"不携带元数据"；任何一项对不上都抛同一句
+   * "Unsupported or malformed image data"——**不说是哪一项**。
+   * 早先这里只报 format/width/height/hasAlpha，于是 `undefined !== "uchar"`
+   * 恒成立，每一张图都在最后一步被判负。相机连续失败的根因就在这里。
+   */
   async metadata() {
     const result = await call('/image/metadata', this._input)
     if (result.status !== 200) throw bridgeError(result, '读取图像元数据')
@@ -178,14 +221,30 @@ class Pipeline {
       width: meta.width,
       height: meta.height,
       hasAlpha: meta.hasAlpha,
-      orientation: meta.orientation,
       channels: meta.hasAlpha ? 4 : 3,
+      depth: meta.depth ?? 'uchar',
+      space: meta.space ?? 'srgb',
+      pages: meta.pages ?? 1,
+      // **故意不报 orientation**：原生侧的每一次解码都带 `WithTransform`，
+      // 方向已经烘进像素、宽高也已对调。再报一次会让上游又转一遍；而且
+      // 上游把"有 orientation"直接算作"携带元数据"，那一项同样是判负项。
+      //
+      // 方向信息并没有丢：它体现在 width/height 上，也体现在解码结果里。
+      ...(meta.carriesMetadata ? { exif: EXIF_PRESENT } : {}),
+      // ImageIO 写出的每一张图都带一个 sRGB ICC，没有 API 能不写。
+      // 照实报会让**我们自己的编码结果**永远通不过上游的自校验，而这个
+      // profile 不含任何用户信息、也不改变"8 位 sRGB"这个事实。
+      // 真正该拦的是 EXIF/GPS，那个在 carriesMetadata 里如实报了。
+      hasProfile: false,
     }
   }
 
   async toBuffer(options) {
     if (this._ops.format === 'raw') {
-      const result = await call('/image/raw', this._input, { maxDim: this._ops.maxDim })
+      const result = await call('/image/raw', this._input, {
+        maxDim: this._ops.maxDim,
+        nearest: this._ops.nearest ? '1' : '0',
+      })
       if (result.status !== 200) throw bridgeError(result, '解码原始像素')
       // 宽高与通道数不在字节流里，靠响应头带回来。
       const info = {
@@ -250,11 +309,29 @@ function wrap(pipeline) {
   })
 }
 
+/**
+ * 入口。第二个参数（`{ failOn, limitInputPixels }`）**故意忽略**：
+ * 它们是 libvips 的解码策略，ImageIO 没有对应旋钮。
+ *
+ * **必须接受任意 `Uint8Array`，不能只认 `Buffer`。** 附件服务归一化完会走
+ * `encode()` 里的 `data: new Uint8Array(data)`，再把它交给
+ * `verifyNormalizedImage` → `detectImage` → `sharp(data)`——那一步传进来的
+ * 就是普通 Uint8Array。只认 Buffer 的话，**每一次归一化都在最后一步炸**，
+ * 而抛出的还是那句与真因无关的 "Unsupported or malformed image data"。
+ */
 function sharp(input) {
-  if (!Buffer.isBuffer(input)) {
-    throw new Error('iOS 的图像桥只接受 Buffer 输入')
+  if (Buffer.isBuffer(input)) return wrap(new Pipeline(input))
+  if (ArrayBuffer.isView(input)) {
+    // 用 byteOffset/byteLength 建视图，不复制：input 可能只是一个大 buffer
+    // 的一段，整块拷过去既浪费又会把别的字节一起发出去。
+    return wrap(new Pipeline(Buffer.from(input.buffer, input.byteOffset, input.byteLength)))
   }
-  return wrap(new Pipeline(input))
+  if (input instanceof ArrayBuffer) return wrap(new Pipeline(Buffer.from(input)))
+  throw new Error(
+    `iOS 的图像桥只接受字节输入（Buffer / TypedArray / ArrayBuffer），收到的是 ${
+      input === null ? 'null' : typeof input
+    }`,
+  )
 }
 
 sharp.kernel = Object.freeze({

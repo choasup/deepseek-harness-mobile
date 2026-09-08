@@ -61,14 +61,21 @@ cat > profiles/mobile-web/package.json <<JSON
 JSON
 printf '[]\n' > profiles/mobile-web/cordis.patch.yml
 
-# 五个包必须**一次装齐**。`npm install --no-save <path>` 逐个装是错的：
+# 本地包必须**一次装齐**。`npm install --no-save <path>` 逐个装是错的：
 # 每次安装都会把不在 package.json 里的包剪掉，结果只剩最后一个。
 # 实测踩过——bundle 里只剩 client-ui-layout-mobile，另外四个全没了。
+#
+# 这个列表要与 packages/mobile-app/cordis.patch.yml 里 insert 的包**逐一对上**。
+# 漏一个的表现不是"少个功能"：补丁里的 loader 条目解析不到包，
+# `assertEntriesActivated` 把 PENDING 当 FAILED，整棵插件树起不来。
+# tool-camera 就漏过一次——它是手动补装进 bundle 的，而 prepare 每次都清空目录，
+# 于是"能用"只是因为那之后没人重跑过这个脚本。
 npm install --omit=dev --no-audit --no-fund \
   "$REPO/packages/mobile-app" \
   "$REPO/packages/remote-registry" \
   "$REPO/packages/shell-ssh" \
   "$REPO/packages/tool-fs-search" \
+  "$REPO/packages/tool-camera" \
   "$REPO/packages/client-ui-layout-mobile"
 
 # npm 对本地 file: 依赖建的是**符号链接**，指向仓库里的源码目录——即逃出了
@@ -84,10 +91,12 @@ npm install --no-audit --no-fund ssh2@^1.17.0 tweetnacl@^1.0.3
 # 设备内入口：先装 fetch shim 再进 dsh。iOS 的 jitless V8 没有 WebAssembly，
 # 而 Node 内置的 undici 用 WASM 版 llhttp——不换掉，dsh 在加载期就死。
 cp "$REPO/tools/fetch-over-node-http.mjs" .
+# 启动自检：跑一遍附件服务的真实归一化链路，见 tools/bridge-selftest.mjs。
+cp "$REPO/tools/bridge-selftest.mjs" .
 cp "$REPO/ios/nodejs-project-bootstrap.mjs" ./bootstrap.mjs 2>/dev/null || true
 
 echo "== 把逃出 bundle 的符号链接换成实体拷贝 =="
-for p in mobile-app remote-registry shell-ssh tool-fs-search client-ui-layout-mobile; do
+for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera client-ui-layout-mobile; do
   L="node_modules/@dsh-mobile/$p"
   [ -L "$L" ] || continue
   rm "$L" && mkdir -p "$L"
@@ -97,6 +106,18 @@ for p in mobile-app remote-registry shell-ssh tool-fs-search client-ui-layout-mo
 done
 ESCAPING=$(find . -type l -exec sh -c 'T=$(readlink "$1"); case "$T" in /*|*../../../*) echo "$1";; esac' _ {} \; 2>/dev/null)
 [ -n "$ESCAPING" ] && { echo "仍有逃出 bundle 的符号链接：" >&2; echo "$ESCAPING" >&2; exit 1; }
+
+# sharp 换成原生桥。**这一步不是优化，是必需的**：真的 sharp 是 libvips 的
+# 原生绑定，iOS 上 dlopen 不了；把 @img 剥掉之后它连 require 都过不去，而
+# 附件服务在**每一次存图**时都要用它。桥把这些调用转发给 ImageIO/CoreGraphics。
+# 见 tools/sharp-bridge/index.cjs。
+#
+# 这一步也漏过一次：桥当初是手动装进 bundle 的，而 prepare 每次都清空目录，
+# 于是"能用"只是因为那之后没人重跑过这个脚本。
+rm -rf node_modules/sharp
+mkdir -p node_modules/sharp
+cp "$REPO/tools/sharp-bridge/index.cjs" "$REPO/tools/sharp-bridge/package.json" node_modules/sharp/
+node -e "require('./node_modules/sharp/package.json')" >/dev/null
 
 echo "== 剥掉原生二进制（iOS 上一律加载不了，纯死重）=="
 BEFORE=$(du -sm . | cut -f1)

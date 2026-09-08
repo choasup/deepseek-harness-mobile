@@ -690,3 +690,89 @@ await watchUserPatches(ctx, ...)   // 用途：监听用户 patch 文件
 分类出 Node 的内部模块加载器**，错误信息有误导性。loader 拿内部访问有两条路：
 `--expose-internals`，或原生模块 `node-addon-require-builtin`（iOS 上已被剥掉）。
 给 argv 加 `--expose-internals` 后两处一起解决。
+
+### 失败 #16：相机存不进图 —— 报错在讲图像，真因是**元数据契约**
+
+症状是拍照连续五次失败，每次都是同一句：
+
+```
+Error: Unsupported or malformed image data
+```
+
+这句话有很强的误导性：它听起来在说"这张图有问题"，于是前四轮的排查方向都是
+"桥少实现了哪个 sharp 方法"——`.raw()`、`.toColourspace()`、`.trim()`，
+补一个、部署一次、再拍一张、再报同一句。每轮一次真机往返。
+
+真因不在方法上，在**上游会校验我们的输出**。`dsh-attachment-local` 归一化的
+最后一步是：
+
+```js
+async function verifyNormalizedImage(image, expectedAlpha) {
+  const detected = await detectImage(image.data)
+  if (detected.mediaType !== image.mediaType || detected.width !== image.width
+      || detected.height !== image.height || detected.animated
+      || detected.carriesMetadata || detected.depth !== "uchar"
+      || detected.space !== "srgb" || !encodedAlphaIsCompatible(expectedAlpha, detected))
+    throw new AttachmentError(...)
+}
+```
+
+它把刚编码出来的字节**重新解码**，逐项比对八件事。桥当时的 `metadata()` 只报
+`format / width / height / hasAlpha`——于是 `undefined !== "uchar"` 恒成立，
+**每一张图**都在最后一步被判负。跟图像本身、跟拍照，一点关系都没有。
+
+三个必须如实满足的点：
+
+1. **`depth` 与 `space` 是硬字段**，不报等于报错。
+2. **不能报 `orientation`。** `carriesRetainedMetadata()` 把"有 orientation"
+   直接算作"携带元数据"；而且 `imageMetadata()` 见到 `orientation >= 5` 还会
+   再对调一次宽高——原生侧已经在 `WithTransform` 里把方向烘进像素了，
+   报出去就是转两遍。
+3. **`carriesMetadata` 不能按"有没有 `{Exif}` 字典"来判。** ImageIO 写出的
+   **每一张** JPEG/PNG 都自带一个只含 `ColorSpace`/`PixelXDimension` 的 Exif
+   字典和一个 `ProfileName = sRGB`。照"有字典就算携带"来报，我们自己的编码
+   结果永远通不过。判据得是"有没有实质标签"（GPS/IPTC/相机型号/时间）——
+   反过来一律报 false 也不行，那会让相机原图连 GPS 一起原样落盘。
+
+还有一处同类问题：`normalize` 必须把缩略图**再画进一个 sRGB 上下文**再编码。
+iPhone 的照片多是 Display P3，直接编码出来 `space` 就不是 `srgb`。
+
+#### 教训：错误信息说的是"哪一类"，不是"哪一个"
+
+上游把八项检查合并成一句话抛出，真因塞在 `cause` 里且从不显示。
+在这种上游面前，"按症状猜"必然是逐个方法试错。**该做的是去读上游那段代码，
+把契约列出来一次对齐**——这次真正解决问题的动作，是把
+`encodingAttemptsAtSize` / `verifyNormalizedImage` 完整读了一遍。
+
+自检也跟着换了做法：不再挨个测桥的方法（那只能覆盖"我想到的"），
+而是直接调 `prepareImageFile`——相机和上传走的同一个入口，四张合成图分别
+命中 JPEG / PNG / 只有 WebP 三条编码分支。见 `tools/bridge-selftest.mjs`。
+自检先在 Mac 上用**真的 sharp** 跑通，确认"自检本身是对的"，再上设备。
+
+### iOS 的 ImageIO 能读 WebP，但写不了
+
+`encodingAttemptsAtSize` 对**带透明通道**的图只给一条路：
+
+```js
+if (hasAlpha) return webp   // 没有 png/jpeg 的退路
+```
+
+而 `CGImageDestinationCopyTypeIdentifiers()` 里没有 WebP（macOS 上实测只有
+jpeg / png / jpeg-2000 等）。退回 JPEG 是不行的——上游比对
+`detected.mediaType !== image.mediaType`，标着 webp 的 JPEG 必然判负，
+而报出来的还是那句和真因无关的 "Unsupported or malformed image data"。
+
+所以把 **libwebp 1.5.0 编进 app**（`ios/WebP/`，~120 个 C 文件，
+`xcrun clang -arch arm64` 直接过，无需改动）。Swift 侧只暴露一个函数，
+见 `ios/WebP/dsh_webp.h`。注意 `CGBitmapContext` 只能给**预乘**的 RGBA
+（8 位非预乘建不出上下文），交给 WebP 前要还原回非预乘，否则半透明区域整片发暗。
+
+### 顺带发现：prepare 脚本漏装了两样东西
+
+`ios/prepare-nodejs-project.sh` 每次都会 `rm -rf nodejs-project`，而
+`@dsh-mobile/tool-camera` 和 sharp 桥当初是**手动补装**进去的——脚本里没有。
+之所以一直"能用"，只是因为那之后没人重跑过这个脚本。
+
+这类问题的表现不是"少个功能"：补丁里的 loader 条目解析不到包，
+`assertEntriesActivated` 把 PENDING 当 FAILED，**整棵插件树起不来**。
+现在两样都在脚本里，且注释里写明了"这个列表要与 cordis.patch.yml 的 insert 逐一对上"。

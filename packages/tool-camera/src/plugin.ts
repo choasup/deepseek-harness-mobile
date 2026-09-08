@@ -87,9 +87,12 @@ export function apply(ctx: Context): void {
       } catch (error) {
         // 失败原因要落进 host 日志：否则它只出现在模型的对话里，
         // 而排查的人在另一头，看不到。
-        console.log(
-          `[take_photo] 失败: ${(error as Error)?.name} ${(error as Error)?.message}`,
-        )
+        //
+        // **必须把 cause 链摊开。** 附件服务把任何图像问题都换成同一句
+        // "Unsupported or malformed image data"，真因原封不动塞进 `cause`
+        // 且从不显示。只打 message 等于什么都没打——这一点让相机的排查
+        // 白白多花了好几轮设备往返。
+        console.log(`[take_photo] 失败: ${describeError(error)}`)
         throw error
       }
     },
@@ -150,4 +153,15 @@ interface Attachments {
 /** ctx.attachments 的类型在 dsh-attachment 里，运行时由宿主提供。 */
 function attachments(ctx: Context): Attachments {
   return (ctx as unknown as { attachments: Attachments }).attachments
+}
+
+/** 把 error.cause 链摊平成一行。真因常在第二、三层。 */
+function describeError(error: unknown): string {
+  const parts: string[] = []
+  let current = error as { name?: string; message?: string; cause?: unknown } | undefined
+  for (let depth = 0; depth < 6 && current; depth += 1) {
+    parts.push(`${current.name ?? 'Error'}: ${current.message ?? String(current)}`)
+    current = current.cause as typeof current
+  }
+  return parts.join(' ← ')
 }

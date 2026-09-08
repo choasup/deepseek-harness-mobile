@@ -11,6 +11,10 @@ targets:
     sources:
       - path: DshMobile
       - path: NodeRuntime
+      # libwebp（1.5.0，BSD）。只为编码而带：iOS 的 ImageIO 能读 WebP 但写不了，
+      # 而 dsh 的附件归一化对带透明通道的图只提供 WebP 这一条路径。
+      # 见 WebP/dsh_webp.h。
+      - path: WebP
       # 设备上要跑的那套 Node 代码（dsh 及其依赖，约 231MB）。
       # type: folder 是关键——按文件夹整体引用，保持目录结构；
       # 默认的 group 方式会把每个文件平铺进 Resources，node_modules 的
@@ -53,8 +57,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dshmobile.shell
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # Swift 通过它看到 dsh_node_start。
+        # Swift 通过它看到 dsh_node_start 与 dsh_webp_encode_rgba。
         SWIFT_OBJC_BRIDGING_HEADER: NodeRuntime/DshMobile-Bridging-Header.h
+        # libwebp 内部按 "src/webp/…" 的形式互相包含，所以搜索根是 WebP/ 本身。
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/WebP
+        # libwebp 自带的 SIMD 分派在 arm64 上只会走 NEON；其余分支靠宏关掉。
+        # 这些告警是上游代码的，不是我们的，压掉以免淹没自己的告警。
+        GCC_WARN_INHIBIT_ALL_WARNINGS: YES
         # Node/V8 的 30 个静态库（gtest 与 torque 是构建期用的，没拷进来）。
         # 它们不入库，由 vendor/build-node22-ios.sh 产出后拷到 NodeLibs/。
         LIBRARY_SEARCH_PATHS:

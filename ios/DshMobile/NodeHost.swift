@@ -51,7 +51,17 @@ enum NodeHost {
         }
 
         bridge.register("POST /image/raw") { body, query in
-            ImageOps.raw(body, maxDim: Int(query["maxDim"] ?? "") ?? 0)
+            ImageOps.raw(
+                body,
+                maxDim: Int(query["maxDim"] ?? "") ?? 0,
+                // sharp 的 `kernel: nearest`。调用方用它来数颜色，平滑重采样
+                // 会把结果算错——见 ImageOps.raw 的说明。
+                nearest: query["nearest"] == "1",
+            )
+        }
+
+        bridge.register("POST /image/capabilities") { _, _ in
+            ImageOps.capabilities()
         }
 
         // 相机是异步且可能被用户取消的，而桥的路由是同步返回。

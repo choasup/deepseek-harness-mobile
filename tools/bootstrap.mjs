@@ -98,13 +98,17 @@ if (process.env.DSH_NATIVE_BRIDGE) {
       .toBuffer({ resolveWithObject: true })
     console.log(`[bridge-selftest] raw ok: ${rawOut.data.length} 字节 info=${JSON.stringify(rawOut.info)}`)
 
-    // 按附件服务的**真实调用链**走一遍，而不是挑几个方法测。
-    // 前两版自检就是因为只测了自己想到的方法（metadata/normalize），
-    // 漏掉 raw、又漏掉 toColourspace，每漏一个就是一轮设备往返。
-    const chain = await sharp(PNG_1X1).rotate().toColourspace('srgb')
-      .clone().resize({ width: 64, height: 64 }).raw()
-      .toBuffer({ resolveWithObject: true })
-    console.log(`[bridge-selftest] 附件链路 ok: ${chain.data.length} 字节`)
+    // 不再自己拼调用链——直接调附件服务的**真实入口** `prepareImageFile`，
+    // 相机和上传走的就是它。自己拼链只能覆盖"我想到的方法"，而最后一次
+    // 失败漏的根本不是方法，是元数据契约（少报 depth/space，
+    // `undefined !== "uchar"` 恒成立，每张图都在最后一步被判负）。
+    //
+    // **不 await**：这一趟要解四张 2100 像素宽的图，会给启动加上几秒。
+    // 它是诊断，不是启动的前置条件；让它和 dsh 的加载并行跑、跑完再记日志。
+    import('./bridge-selftest.mjs')
+      .then((selftest) => selftest.runAttachmentSelfTest((line) => console.log(line)))
+      .then((ok) => console.log(`[bridge-selftest] 附件归一化自检${ok ? '全部通过' : '有失败项'}`))
+      .catch((error) => console.log(`[bridge-selftest] 附件归一化自检没跑起来: ${error?.stack ?? error}`))
 
     // 大 body 专项：相机照片是几百 KB，而上面那张 PNG 只有几十字节。
     // 相机路由（空 body）是通的、metadata（小 body）也是通的，唯独真实照片失败

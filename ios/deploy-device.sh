@@ -43,7 +43,12 @@ cat <<'EOF'
 装好了。第一次运行手机上可能要先信任开发者证书：
   设置 → 通用 → VPN与设备管理 → 开发者App → 信任
 
-app 起来后会连不上（默认地址 127.0.0.1 在手机上指的是手机自己），
-会自动弹出连接设置，填 Mac 的局域网地址。
-Mac 那边要先把 host 起在局域网上——见仓库 README「装到真机上」一节。
+runtime 在手机里：app 会自己起 Node，加载 dsh 的插件树，再连自己的
+127.0.0.1:47799。**不需要 Mac 上开 host，也不需要填任何地址。**
+首次启动要几十秒（插件树装载），界面上会显示"正在启动 dsh"。
+
+起不来的话，日志在设备的 Documents 里，这样取：
+  xcrun devicectl device copy from --device <UDID> \
+    --domain-type appDataContainer --domain-identifier com.dshmobile.shell \
+    --source Documents/dsh-host.log --destination ./dsh-host.log
 EOF

@@ -10,13 +10,15 @@
     "build": "pnpm -r run build",
     "test": "pnpm -r run build && vitest run",
     "test:jitless": "node --jitless ./node_modules/vitest/vitest.mjs run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:sharp-bridge": "node tools/verify-sharp-bridge.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.0",
     "tsdown": "^0.23.0",
     "typescript": "^5.7.0",
+    "unrun": "^0.3.1",
     "vitest": "^3.0.0"
   }
 }

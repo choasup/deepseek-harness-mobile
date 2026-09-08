@@ -53,7 +53,12 @@ final class EndpointSettingsViewController: UIViewController {
         connect.setTitle("连接", for: .normal)
         connect.addTarget(self, action: #selector(connectTapped), for: .touchUpInside)
 
-        let stack = UIStackView(arrangedSubviews: [title, field, connect, detail])
+        let useEmbedded = UIButton(configuration: .plain())
+        useEmbedded.setTitle("用设备内 runtime（\(HarnessEndpoint.embedded.absoluteString)）", for: .normal)
+        useEmbedded.addTarget(self, action: #selector(resetToEmbedded), for: .touchUpInside)
+        useEmbedded.isHidden = !HarnessEndpoint.isOverridden
+
+        let stack = UIStackView(arrangedSubviews: [title, field, connect, useEmbedded, detail])
         stack.axis = .vertical
         stack.spacing = 16
         stack.setCustomSpacing(24, after: connect)
@@ -74,8 +79,14 @@ final class EndpointSettingsViewController: UIViewController {
         field.becomeFirstResponder()
     }
 
+    /// 丢掉开发覆盖值，回到设备内 runtime。
+    @objc private func resetToEmbedded() {
+        HarnessEndpoint.clearOverride()
+        dismiss(animated: true) { [onConnect] in onConnect?(HarnessEndpoint.embedded) }
+    }
+
     @objc private func connectTapped() {
-        guard let url = HarnessEndpoint.set(field.text ?? "") else {
+        guard let url = HarnessEndpoint.setOverride(field.text ?? "") else {
             // 不静默失败——手机上打错地址太容易，说清楚哪里不对。
             detail.textColor = .systemRed
             detail.text = "这个地址读不出主机名。形如 192.168.1.9:7799，或带上 http://。"

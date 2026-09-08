@@ -27,8 +27,24 @@ final class HarnessViewController: UIViewController {
     private let retryButton = UIButton(configuration: .tinted())
 
     /// host 冷启动的等待上限。超过就当失败并给诊断——一直转圈是最差的失败方式。
-    private static let startupTimeout: TimeInterval = 60
+    /// Mac 上 jitless 实测 2 秒就绪；给设备留足余量，但不能无限等。
+    private static let startupTimeout: TimeInterval = 45
     private var pollDeadline: Date?
+    /// 最后一次轮询的失败原因。失败时显示出来——不然"连不上"是个黑箱。
+    private var lastPollError: String?
+
+    /// 专用于探测本地 host 的 session。
+    ///
+    /// `connectionProxyDictionary = [:]` 是关键：这台设备所在的网络配了 HTTP
+    /// 代理，而 iOS 默认会让 URLSession 走系统代理**连 loopback 也不例外**。
+    /// 那样探测请求会被代理接管，永远等不到本机的 host。
+    private lazy var probeSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        config.timeoutIntervalForRequest = 3
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
 
     override var canBecomeFirstResponder: Bool { true }
 
@@ -120,13 +136,15 @@ final class HarnessViewController: UIViewController {
     private func waitForHostThenLoad() {
         let url = HarnessEndpoint.current
         var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
+        // 用 GET 而不是 HEAD：有些服务端不实现 HEAD，那会把"已就绪"误判成"没起来"。
+        request.httpMethod = "GET"
         request.timeoutInterval = 3
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+        probeSession.dataTask(with: request) { [weak self] _, response, error in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.lastPollError = error.map { String(describing: ($0 as NSError).localizedDescription) }
                 if (response as? HTTPURLResponse) != nil {
                     self.webView.load(URLRequest(url: url))
                     return
@@ -161,7 +179,21 @@ final class HarnessViewController: UIViewController {
         retryButton.isHidden = false
         statusLabel.text = "dsh 没能启动"
         detailLabel.isHidden = false
-        detailLabel.text = tailOfHostLog() ?? "没有日志输出。"
+        let diagnostic = [
+            "探测 \(HarnessEndpoint.current.absoluteString)",
+            lastPollError.map { "失败：\($0)" } ?? "失败：无错误对象（响应不是 HTTP）",
+            "",
+            tailOfHostLog() ?? "host 没有日志输出。",
+        ].joined(separator: "\n")
+        detailLabel.text = diagnostic
+        // 同时落盘：屏幕上的诊断只有拿着手机的人看得到，而排查往往在另一头。
+        try? diagnostic.write(to: Self.diagnosticURL, atomically: true, encoding: .utf8)
+    }
+
+    /// 诊断信息的落盘位置，用 `devicectl copy from` 取回。
+    static var diagnosticURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("startup-diagnostic.txt")
     }
 
     private func tailOfHostLog() -> String? {
@@ -203,6 +235,9 @@ extension HarnessViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         launchView.isHidden = true
         webView.isHidden = false
+        // 成功了就清掉上一次的诊断。留着会误导——排查时看到一个陈旧文件，
+        // 很容易当成本次失败的证据（我自己刚踩过这个）。
+        try? FileManager.default.removeItem(at: Self.diagnosticURL)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

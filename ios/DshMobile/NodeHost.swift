@@ -33,6 +33,56 @@ enum NodeHost {
 
     private static var thread: Thread?
 
+    /// 把原生能力挂到桥上。路径与 `sharp` 桥接实现、`take_photo` 工具约定一致。
+    private static func registerBridgeRoutes() {
+        let bridge = NativeBridge.shared
+
+        bridge.register("POST /image/metadata") { body, _ in
+            ImageOps.metadata(body)
+        }
+
+        bridge.register("POST /image/normalize") { body, query in
+            ImageOps.normalize(
+                body,
+                maxDim: Int(query["maxDim"] ?? "") ?? 0,
+                quality: Double(query["quality"] ?? "") ?? 0.8,
+                format: query["format"] ?? "jpeg",
+            )
+        }
+
+        // 相机是异步且可能被用户取消的，而桥的路由是同步返回。
+        // 用信号量把它转成同步：这条请求本来就该一直等到用户拍完或取消
+        // ——超时会让"用户正在取景"变成一次失败。
+        bridge.register("POST /camera/capture") { _, _ in
+            let semaphore = DispatchSemaphore(value: 0)
+            var outcome: Result<Data, CameraBridge.CameraError> = .failure(.failed("未开始"))
+            Task { @MainActor in
+                CameraBridge.shared.capture { result in
+                    outcome = result
+                    semaphore.signal()
+                }
+            }
+            semaphore.wait()
+
+            switch outcome {
+            case let .success(jpeg):
+                var response = BridgeResponse(status: 200, body: jpeg)
+                response.contentType = "image/jpeg"
+                return response
+            case .failure(.cancelled):
+                // 409 而不是 500：用户取消不是错误，是一个正当结果。
+                // Node 侧据此告诉模型"用户取消了"，而不是重试。
+                return .json(["cancelled": true], status: 409)
+            case let .failure(.denied):
+                return .error("相机权限被拒绝", status: 403)
+            case let .failure(.unavailable(message)):
+                return .error(message, status: 501)
+            case let .failure(.failed(message)):
+                return .error(message, status: 500)
+            }
+        }
+    }
+
     /// 探针结果落盘的位置。放 Documents 是为了能用
     /// `xcrun devicectl device copy from` 取回来——设备上没有终端，
     /// 而 Node 的 stdout 在 app 里默认哪儿都不去。
@@ -121,6 +171,15 @@ enum NodeHost {
         // 不拷贝）。
         try? fm.createSymbolicLink(at: profiles.appendingPathComponent("node_modules"),
                                    withDestinationURL: root.appendingPathComponent("node_modules"))
+
+        // 原生桥：图像处理与相机。**必须在 Node 起来之前**，因为端口要通过
+        // 环境变量交给它——Node 启动后再 setenv 就晚了。
+        // 起不来也继续：那只意味着相机与图像归一化不可用，agent 的其余能力
+        // 不受影响，不该因此整个 app 起不来。
+        if let port = NativeBridge.shared.start() {
+            registerBridgeRoutes()
+            setenv("DSH_NATIVE_BRIDGE", "http://127.0.0.1:\(port)", 1)
+        }
 
         setenv("DSH_HOME", dshHome.path, 1)
         // dsh 的工作区默认取 cwd；bundle 只读，指到可写目录去。

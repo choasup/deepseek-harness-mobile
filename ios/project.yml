@@ -41,7 +41,9 @@ targets:
           NSAllowsLocalNetworking: true
         # iOS 14 起访问局域网要用户授权，没有这条描述系统不会弹授权框，
         # 连接会直接失败——而失败信息看不出是权限问题。
-        NSLocalNetworkUsageDescription: 用于连接你 Mac 上运行的 dsh host。
+        NSLocalNetworkUsageDescription: 用于连接本机运行的 dsh host。
+        # agent 请求拍照时用。系统会在第一次请求时弹授权框——按不按快门是人的事。
+        NSCameraUsageDescription: 让 agent 在你同意后拍一张照片作为输入。
         # dshmobile://settings[?url=…] —— 连接设置的第二个入口。
         # 摇一摇是给人的，这个是给自动化和"界面卡住时从链接回来"用的。
         CFBundleURLTypes:

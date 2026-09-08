@@ -247,6 +247,19 @@
     - id: ui-layout-mobile
       name: '@dsh-mobile/client-ui-layout-mobile'
 
+    # take_photo：让模型请求用设备相机拍一张照片。
+    #
+    # 这是「手机是大脑和感官」里**感官**那一半——摄像头是这个形态相对桌面
+    # harness 唯一无法替代的输入。
+    #
+    # 拍照与图像归一化都在原生侧（CameraBridge + ImageOps 走 ImageIO）：
+    # iOS 上没有可用的 sharp，而手机本来就有更合适的 API。桥的地址由原生侧
+    # 通过 DSH_NATIVE_BRIDGE 环境变量给出；没有这个变量时插件**不注册工具**
+    # 而不是注册一个必然失败的——模型的工具目录里出现一个每次都报错的工具，
+    # 比没有这个工具更糟。所以这一行在 Mac 上也能安全加载。
+    - id: tool-camera
+      name: '@dsh-mobile/tool-camera'
+
     - id: tool-fs-search-js
       name: '@dsh-mobile/tool-fs-search/plugin'
 
@@ -373,3 +386,64 @@
 # /plugins 下。所以换 layout 不需要重建 dsh 的前端。
 - id: ui-layout
   disabled: true
+
+
+# ── H. 把 dsh-web-app 关掉的工具重新打开 ──────────────────────────────
+#
+# **这一段是"这个 app 能干什么"的关键，之前漏了。**
+#
+# `dsh-web-app` 禁用了 24 行宿主层的工具（tool-fs、str-replace-editor、
+# tool-web、tool-todo、plan-mode、compaction……），因为在 Web 模式下这些能力
+# 由 **agent preset** 提供——它的注释原话："Its producers … are preset rows"。
+#
+# 而 F 段为了绕开 iOS 没有 shell，把 `agent-presets` 整个禁掉了。两件事叠加的
+# 结果是：**模型手里几乎没有任何工具**——不能读写文件、不能搜网、没有待办、
+# 没有计划模式、没有上下文压缩。用户的原话是"这个 app 也没有 writing 的能力，
+# 有点弱"，一点没说错。
+#
+# 修法是把 preset 本该提供、而在 iOS 上确实可用的那些重新打开。
+# 判据只有一条：**它是否依赖本地进程**。
+#
+# 不打开的（都依赖 iOS 上不存在的东西）：
+#   tool-bash / tool-pwsh          需要本地 shell
+#   tool-fs-search                 需要 ripgrep 二进制（已有纯 JS 替代）
+#   tool-jobs                      后台作业的生产者是 bash/terminal，没有生产者
+#   workflow-worker-thread /       worker_threads 在 iOS 上未验证，
+#   tool-workflow                  留到实测之后再说（spec §10 的未决问题）
+#   tool-ralph                     用途未核实，不做没依据的开关
+#   hmr                            见 F'' 段
+- id: tool-fs
+  disabled: false
+- id: tool-str-replace-editor
+  disabled: false
+- id: tool-todo
+  disabled: false
+- id: tool-goal
+  disabled: false
+- id: tool-web
+  disabled: false
+- id: tool-skill
+  disabled: false
+- id: skill-filesystem
+  disabled: false
+- id: plan-mode
+  disabled: false
+- id: agent-instructions
+  disabled: false
+# 上下文压缩：手机上会话更长、更零碎，没有它长对话会直接撞上下文上限。
+- id: compaction-basic
+  disabled: false
+- id: command-compact
+  disabled: false
+- id: tool-result-pruner
+  disabled: false
+# 子 agent 在进程内 fork/spawn（subagent-spawn-in-process 本就启用），
+# 不依赖本地进程。
+- id: tool-subagent
+  disabled: false
+- id: tool-subagent-fork
+  disabled: false
+- id: tool-subagent-control
+  disabled: false
+- id: tool-subagent-list-agents
+  disabled: false

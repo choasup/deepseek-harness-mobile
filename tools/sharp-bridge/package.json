@@ -1,0 +1,7 @@
+{
+  "name": "sharp",
+  "version": "0.35.4",
+  "description": "dsh-mobile: sharp 的 iOS 实现，转发给原生 CoreImage/ImageIO",
+  "type": "commonjs",
+  "main": "index.cjs"
+}

@@ -1,9 +1,10 @@
 import UIKit
 
-/// 在设备上填 host 地址。
+/// 地址覆盖。**开发入口，不在正常路径上。**
 ///
-/// 真机上没有别的途径：不能传启动参数，每台 Mac 的局域网地址也不一样。
-/// 连不上时自动弹出来，平时摇一摇也能叫出来（见 HarnessViewController）。
+/// runtime 在设备内之后，普通用户永远不该看到这个界面——app 连的是自己，
+/// 让人填地址是把实现细节漏到界面上。它现在只由 `dshmobile://settings`
+/// 或摇一摇进入，用途是开发时把界面指向 Mac 上的 host，省掉重新打包 300MB。
 final class EndpointSettingsViewController: UIViewController {
     /// 填好并确认后回调，参数是规范化之后的地址。
     var onConnect: ((URL) -> Void)?
@@ -28,14 +29,13 @@ final class EndpointSettingsViewController: UIViewController {
         detail.adjustsFontForContentSizeCategory = true
         detail.textColor = .secondaryLabel
         detail.text = """
-        这一版的 runtime 跑在 Mac 上，不在手机里。填 Mac 的局域网地址。
+        开发用。默认地址是 app 自己的 runtime，正常情况不需要改。
 
-        Mac 上要先起 host（把 <Mac IP> 换成实际地址）：
+        指向 Mac 上的 host 可以省掉重新打包：
         dsh --profile mobile-web --host <Mac IP> \\
             --port 7799 --no-open --trusted-host <Mac IP>:7799
 
-        注意这会把 dsh 的接口暴露给同一个局域网，而 dsh 能执行代码——
-        用完就把它停掉，别在公共 Wi-Fi 上开着。
+        那会把 dsh 的接口暴露给局域网，而 dsh 能执行代码——用完就停掉。
         """
 
         field.borderStyle = .roundedRect

@@ -35,85 +35,106 @@ export function apply(ctx: Context): void {
     return
   }
 
-  ctx.plugin(
-    defineTool((toolCtx: Context) => ({
-      name: 'take_photo',
-      description:
-        'Ask the user to take a photo with the device camera and return the image. ' +
-        'The system camera UI is shown and the user may cancel; a cancelled capture ' +
-        'returns { cancelled: true } rather than an error. Use this when seeing the ' +
-        "user's physical surroundings would answer the question.",
-      parameters: {
-        reason: {
-          type: 'string',
-          required: false,
-          description: 'Shown to the user to explain why a photo is being requested.',
-        },
+  const tool = defineTool({
+    name: 'take_photo',
+    description:
+      'Ask the user to take a photo with the device camera and return the image. ' +
+      'The system camera UI is shown and the user may cancel; a cancelled capture ' +
+      'reports cancelled: true rather than failing. Use this when seeing the ' +
+      "user's physical surroundings would answer the question.",
+    parameters: {
+      reason: {
+        type: 'string',
+        description: "Shown to the user to explain why a photo is being requested.",
       },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            cancelled: { type: 'boolean' },
-            image: {
-              type: 'object',
-              properties: {
-                attachmentId: { type: 'string' },
-                mediaType: { type: 'string' },
-                width: { type: 'number' },
-                height: { type: 'number' },
-              },
+    },
+    output: {
+      // additionalProperties 必须**显式**给 true/false——dsh 的校验器不接受
+      // 省略（JsonSchemaError: must be explicitly true or false）。
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          cancelled: { type: 'boolean', required: true },
+          image: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              attachmentId: { type: 'string', required: true },
+              mediaType: { type: 'string', required: true },
+              width: { type: 'number', required: true },
+              height: { type: 'number', required: true },
             },
           },
         },
       },
-      async handler() {
-        const response = await fetch(`${BRIDGE}/camera/capture`, { method: 'POST' })
+      // 模型看到的文本。取消时说清楚是**用户主动取消**，不是失败——
+      // 否则模型会把它当成故障去重试，反复骚扰用户。
+      render: (_args: unknown, value: CaptureResult) => [
+        {
+          type: 'text' as const,
+          text: value.cancelled
+            ? 'The user cancelled the photo capture. Do not retry unless they ask.'
+            : `Photo captured: ${value.image?.width}x${value.image?.height} ` +
+              `${value.image?.mediaType}, attachment ${value.image?.attachmentId}`,
+        },
+      ],
+    },
+    async execute(args: { reason?: string }): Promise<CaptureResult> {
+      void args
+      const response = await fetch(`${BRIDGE}/camera/capture`, { method: 'POST' })
 
-        // 409 = 用户取消。这是正当结果，不是失败。
-        if (response.status === 409) return { cancelled: true }
-        if (!response.ok) {
-          const detail = await response.text().catch(() => '')
-          throw new Error(`拍照失败（HTTP ${response.status}）：${detail.slice(0, 200)}`)
-        }
+      // 409 = 用户取消。这是正当结果，不是失败。
+      if (response.status === 409) return { cancelled: true }
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '')
+        throw new Error(`拍照失败（HTTP ${response.status}）：${detail.slice(0, 200)}`)
+      }
 
-        const data = Buffer.from(await response.arrayBuffer())
-        const attachments = (toolCtx as unknown as { attachments: {
-          saveImage(input: { data: Buffer; mediaType: string; name?: string }): Promise<{
-            attachmentId: string
-            mediaType: string
-            bytes: number
-            width: number
-            height: number
-          }>
-        } }).attachments
+      const data = Buffer.from(await response.arrayBuffer())
+      // 原生侧已经归一化成 JPEG，这里只是入库并拿到模型可引用的 id。
+      const ref = await attachments(ctx).saveImage({
+        data,
+        mediaType: 'image/jpeg',
+        name: `photo-${new Date().toISOString().replace(/[:.]/gu, '-')}.jpg`,
+      })
+      return {
+        cancelled: false,
+        image: {
+          attachmentId: ref.attachmentId,
+          mediaType: ref.mediaType,
+          width: ref.width,
+          height: ref.height,
+        },
+      }
+    },
+    presentCall(args: { reason?: string }) {
+      return {
+        card: 'generic' as const,
+        title: args.reason ? `拍照：${args.reason}` : '请求拍照',
+        kind: 'read' as const,
+      }
+    },
+  })
 
-        // 原生侧已经归一化成 JPEG，这里只是入库并拿到模型可引用的 id。
-        const ref = await attachments.saveImage({
-          data,
-          mediaType: 'image/jpeg',
-          name: `photo-${new Date().toISOString().replace(/[:.]/gu, '-')}.jpg`,
-        })
+  ctx.effect(() => ctx.tools.register(tool))
+}
 
-        return {
-          cancelled: false,
-          image: {
-            attachmentId: ref.attachmentId,
-            mediaType: ref.mediaType,
-            bytes: ref.bytes,
-            width: ref.width,
-            height: ref.height,
-          },
-        }
-      },
-      presentCall(args: { reason?: string }) {
-        return {
-          card: 'generic',
-          title: args.reason ? `拍照：${args.reason}` : '请求拍照',
-          kind: 'read',
-        }
-      },
-    })),
-  )
+interface CaptureResult {
+  cancelled: boolean
+  image?: { attachmentId: string; mediaType: string; width: number; height: number }
+}
+
+interface Attachments {
+  saveImage(input: { data: Buffer; mediaType: string; name?: string }): Promise<{
+    attachmentId: string
+    mediaType: string
+    width: number
+    height: number
+  }>
+}
+
+/** ctx.attachments 的类型在 dsh-attachment 里，运行时由宿主提供。 */
+function attachments(ctx: Context): Attachments {
+  return (ctx as unknown as { attachments: Attachments }).attachments
 }

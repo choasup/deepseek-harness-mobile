@@ -63,6 +63,12 @@ final class HarnessViewController: UIViewController {
         // 设备内 runtime。返回 false 表示这一版没带 Node 侧代码（打包问题），
         // 那时才需要外部地址。
         let embedded = NodeHost.startIfAvailable()
+
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main,
+        ) { [weak self] _ in self?.handleWillEnterForeground() }
         pollDeadline = Date().addingTimeInterval(Self.startupTimeout)
         statusLabel.text = embedded ? "正在启动 dsh…" : "正在连接…"
         waitForHostThenLoad()
@@ -71,6 +77,39 @@ final class HarnessViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         becomeFirstResponder()
+    }
+
+    /// 回前台时确认 host 还活着，必要时重新加载。
+    ///
+    /// iOS 会挂起后台 app：进程被冻结、TCP 连接被系统撕掉。回来之后
+    /// WebView 里那个页面还在，但它到 host 的连接已经死了——表现就是
+    /// "发不出消息，Load failed"，而页面本身看不出任何异常。
+    ///
+    /// 拍照尤其容易触发：系统相机是另一个界面，期间 app 很可能被挂起。
+    ///
+    /// 这里只做一件事：探一下本地 host。通了就重新加载页面（重建连接），
+    /// 不通就回到启动态等它起来。**不重启 Node**——它在同一个进程里，
+    /// 重启等于重来一遍几十秒的插件树装载。
+    private func handleWillEnterForeground() {
+        guard !webView.isHidden else { return }   // 还在启动态，自有轮询在管
+        var request = URLRequest(url: HarnessEndpoint.current)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        probeSession.dataTask(with: request) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if (response as? HTTPURLResponse) != nil {
+                    // host 还在，但页面的连接可能已断——重新加载最省事，
+                    // 也比让用户对着一个发不出消息的界面强。
+                    self.webView.reload()
+                } else {
+                    self.webView.isHidden = true
+                    self.launchView.isHidden = false
+                    self.retry()
+                }
+            }
+        }.resume()
     }
 
     private func setUpWebView() {

@@ -82,6 +82,27 @@ export function apply(ctx: Context): void {
     },
     async execute(args: { reason?: string }): Promise<CaptureResult> {
       void args
+      try {
+        return await capture()
+      } catch (error) {
+        // 失败原因要落进 host 日志：否则它只出现在模型的对话里，
+        // 而排查的人在另一头，看不到。
+        console.log(
+          `[take_photo] 失败: ${(error as Error)?.name} ${(error as Error)?.message}`,
+        )
+        throw error
+      }
+    },
+    presentCall(args: { reason?: string }) {
+      return {
+        card: 'generic' as const,
+        title: args.reason ? `拍照：${args.reason}` : '请求拍照',
+        kind: 'read' as const,
+      }
+    },
+  })
+
+  async function capture(): Promise<CaptureResult> {
       const response = await fetch(`${BRIDGE}/camera/capture`, { method: 'POST' })
 
       // 409 = 用户取消。这是正当结果，不是失败。
@@ -107,15 +128,7 @@ export function apply(ctx: Context): void {
           height: ref.height,
         },
       }
-    },
-    presentCall(args: { reason?: string }) {
-      return {
-        card: 'generic' as const,
-        title: args.reason ? `拍照：${args.reason}` : '请求拍照',
-        kind: 'read' as const,
-      }
-    },
-  })
+  }
 
   ctx.effect(() => ctx.tools.register(tool))
 }

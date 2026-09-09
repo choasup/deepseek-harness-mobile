@@ -35,7 +35,23 @@ xcodebuild -project DshMobile.xcodeproj -scheme DshMobile \
   -allowProvisioningUpdates build
 
 APP=build-device/Build/Products/Debug-iphoneos/DshMobile.app
+
+# 装之前先把在跑的实例结束掉。
+#
+# 装包本身会替换 bundle 目录，而**紧接着 launch 会和这个替换抢**：实测出现过
+# 一次 dsh 正常起来（日志里 `dsh web:` 和全部自检都绿）、外壳却报"无法连接
+# 服务器"，进程随后消失。干净地 kill 一次再装，这种状态就不会出现。
+PID=$(xcrun devicectl device info processes --device "$DEVICE_ID" 2>/dev/null \
+  | grep -i 'DshMobile.app/DshMobile' | head -1 | awk '{print $1}')
+if [[ -n "$PID" ]]; then
+  echo "先结束正在跑的实例 (pid $PID)"
+  xcrun devicectl device process signal --device "$DEVICE_ID" --pid "$PID" --signal SIGKILL >/dev/null 2>&1 || true
+  sleep 2
+fi
+
 xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
+# 装完稍等一下再拉起：容器刚被替换，立刻启动容易撞上。
+sleep 3
 xcrun devicectl device process launch --device "$DEVICE_ID" com.dshmobile.shell
 
 cat <<'EOF'

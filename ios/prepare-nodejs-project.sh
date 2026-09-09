@@ -120,6 +120,12 @@ mkdir -p node_modules/sharp
 cp "$REPO/tools/sharp-bridge/index.cjs" "$REPO/tools/sharp-bridge/package.json" node_modules/sharp/
 node -e "require('./node_modules/sharp/package.json')" >/dev/null
 
+# 附件落盘时 dsh 会从 DSH_HOME 一路往上 fsync 每一级祖先目录，边界是 `/`。
+# iOS 沙盒在容器上面一层就拦下来（EPERM），表现是"拍照失败"而只字不提文件系统。
+# 见 tools/patch-ios-attachment-durability.mjs。锚点对不上会直接失败，不静默跳过。
+node "$REPO/tools/patch-ios-attachment-durability.mjs" \
+  node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js
+
 echo "== 剥掉原生二进制（iOS 上一律加载不了，纯死重）=="
 BEFORE=$(du -sm . | cut -f1)
 find . -name "*.node" -type f -delete 2>/dev/null || true

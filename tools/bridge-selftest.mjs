@@ -193,6 +193,7 @@ export async function runAttachmentSelfTest(log) {
   }
 
   let failures = 0
+  const written = []
   for (const sample of samples()) {
     try {
       const prepared = await store.prepareImageFile(
@@ -210,6 +211,7 @@ export async function runAttachmentSelfTest(log) {
         continue
       }
       log(`[bridge-selftest] ${sample.name} ok → ${shape}`)
+      written.push(prepared)
     } catch (error) {
       if (sample.needsWebP && !webp) {
         // 已知缺口，不算回归：这条路径只有 WebP 一种编码，而这台设备的
@@ -221,5 +223,41 @@ export async function runAttachmentSelfTest(log) {
       log(`[bridge-selftest] ${sample.name} 失败: ${describeError(error)}`)
     }
   }
+  // ── 落盘路径 ──────────────────────────────────────────────────────
+  //
+  // **这一段是补上一个真实的缺口。** 上面用的 `prepareImageFile` 按它自己的
+  // 文档是 "without touching storage"——正因如此，它一次也没走到发布那条路，
+  // 而相机走的 `saveImage` 走的就是那条。结果是：四条编码分支全绿，用户拍照
+  // 照样失败，报的是
+  //
+  //     EPERM: operation not permitted, open '/var/mobile/Containers/Data/Application'
+  //
+  // （dsh 发布前会从 DSH_HOME 一路往上 fsync 每一级祖先，边界是 `/`，
+  // iOS 沙盒在容器上面一层拦下。见 tools/patch-ios-attachment-durability.mjs。）
+  //
+  // 教训是具体的：**自检要覆盖真正会跑的那条路，不是好测的那条。**
+  const prepared = written[0]
+  if (prepared !== undefined) {
+    const home = process.env.DSH_HOME
+    if (home === undefined) {
+      log('[bridge-selftest] 落盘自检跳过：没有 DSH_HOME')
+    } else {
+      // 单独的根，跑完删掉——不往真正的附件库里塞测试图。
+      // 但它的父目录仍是 DSH_HOME，所以 ensureDurableHome 那段照样会走到。
+      const path = await import('node:path')
+      const fs = await import('node:fs/promises')
+      const root = path.join(home, 'selftest-attachments', 'v1')
+      try {
+        const ref = await store.commitPreparedImageFile(root, prepared)
+        log(`[bridge-selftest] 落盘 ok → ${ref.attachmentId} ${ref.bytes} 字节`)
+      } catch (error) {
+        failures += 1
+        log(`[bridge-selftest] 落盘失败: ${describeError(error)}`)
+      } finally {
+        await fs.rm(path.join(home, 'selftest-attachments'), { recursive: true, force: true })
+      }
+    }
+  }
+
   return failures === 0
 }

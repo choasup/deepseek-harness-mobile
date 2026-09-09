@@ -908,3 +908,49 @@ ensureDurableHome(home) → ensureDurableDirectory(home, parse(home).root)
 
 前三个是读 dsh 源码读出来的；第四个是靠 `cause` 链打进 host 日志才当场看见——
 那行日志是修前三个时顺手加的，这次立刻回本。
+
+### 失败 #18：拍到了、存进去了，模型却看不见
+
+修完 EPERM 之后，用户报的不再是"拍照失败"，而是**"拍照完了，但是 dsh 检索
+不到"**。日志里没有 `[take_photo] 失败`——拍照成功、归一化成功、落盘也成功。
+
+坏在最后一步：**交付**。`take_photo` 的 `render` 只返回了一个 text 块：
+
+```
+Photo captured: 800x600 image/jpeg, attachment sha256:…
+```
+
+模型手上就只有这么一个字符串，没有任何办法把它变成看得见的图。
+
+dsh 有 `ImageBlock`（`{ type: 'image', attachment: ImageAttachmentRef }`），
+而它自己的 `read_image` 返回的是**两块**——文字信封 + image 块
+（`dsh-tool-fs` 的 `imageReadContent`）。照同一个约定改。
+
+连带一个必然的坑：`ImageAttachmentRef` 要求 `bytes`，而工具的输出 schema 和
+那个手写的 `Attachments` 接口**都漏了这个字段**。少它一个，拼不出 image 块。
+注释里写明了这不是"类型不够严谨"，而是"照片存进去了模型却看不见"。
+
+#### 拍照这条链，五次失败的完整清单
+
+| 用户看到 | 真因 | 怎么发现的 |
+|---|---|---|
+| Unsupported or malformed image data | 元数据契约缺 `depth`/`space` | 读 dsh 源码 |
+| 同上 | `sharp()` 只认 Buffer，不认 `Uint8Array` | 读 dsh 源码 |
+| 同上 | `webp()` 偷偷退回 JPEG，媒体类型对不上 | 读 dsh 源码 |
+| 拍照失败 | 沙盒外目录 fsync 被拒（EPERM） | `cause` 链打进日志 |
+| **拍照完了但检索不到** | 只给了 id，没给 image 块 | 日志里**没有**失败行 |
+
+**没有一次的错误信息指向真因。** 前三个是把 `dsh-attachment-local` 的归一化
+源码完整读了一遍才对齐的；第四个靠的是修前三个时顺手加的 `cause` 链日志；
+第五个靠的是**否定证据**——日志里没有 `[take_photo] 失败`，一下就把范围从
+"拍照链"缩到了"交付那一步"。
+
+#### 验证方式改了三次，每次都是被现实打回来的
+
+1. 挨个测桥的方法 → 只能覆盖"我想到的方法"，而漏的是**契约**
+2. 改调 `prepareImageFile`（相机和上传的同一个入口）→ 但它的文档原话是
+   "without touching storage"，**正因如此漏掉了整条落盘路径**
+3. 补上 `commitPreparedImageFile` → 现在覆盖到发布
+
+第 5 个 bug（交付）**仍然不在自检范围内**：`render` 是纯函数，自检跑的是
+`execute` 那条路。这是已知缺口，记在这里而不是假装完整。

@@ -199,6 +199,46 @@ if (process.env.DSH_NATIVE_BRIDGE) {
 // ── 第三步：进 dsh ───────────────────────────────────────────────────
 await import('./node_modules/@deepseek-ai/dsh/lib/bin.js')
 
+// ── 第三步半：确认端口真的在接受连接 ─────────────────────────────────
+//
+// **"dsh 打印了一个 URL"和"端口真的通"是两件事。** 实测遇到过两次：日志里
+// `dsh web: http://127.0.0.1:47799` 打印了、自检全绿、进程也活着，外壳却报
+// "无法连接服务器"。若 `listen()` 因端口被上一个实例占着而失败，那行照样会打印，
+// 而错误可能被吞掉——光看日志分辨不出来。
+//
+// 所以这里自己连一次。这是**否定证据的来源**：下次再出现同样的症状，
+// 这一行会直接说清是"端口通、外壳连不上"还是"端口根本没起来"。
+{
+  const http = await import('node:http')
+  const port = Number(process.argv.find((a, i) => process.argv[i - 1] === '--port') ?? 47799)
+  const probe = (attempt) =>
+    new Promise((resolve) => {
+      const req = http.request(
+        { host: '127.0.0.1', port, path: '/', method: 'GET', timeout: 2000 },
+        (res) => {
+          res.resume()
+          resolve(`HTTP ${res.statusCode}`)
+        },
+      )
+      req.on('timeout', () => req.destroy(new Error('超时')))
+      req.on('error', (error) => resolve(`${error.code ?? ''} ${error.message}`))
+      req.end()
+    })
+  // 连三次：第一次可能恰好赶在 listen 之前。
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = await probe(attempt)
+    if (result.startsWith('HTTP')) {
+      console.log(`[port-check] 127.0.0.1:${port} 通了（${result}）`)
+      break
+    }
+    if (attempt === 3) {
+      console.log(`[port-check] 127.0.0.1:${port} **连不上**：${result}——端口没起来，不是外壳的问题`)
+    } else {
+      await new Promise((r) => setTimeout(r, 500))
+    }
+  }
+}
+
 // ── 第四步：dsh 起来之后再跑自检 ─────────────────────────────────────
 //
 // 顺序是有代价的教训：自检和启动并行会把启动拖过外壳 45 秒的超时线，

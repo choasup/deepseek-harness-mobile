@@ -161,6 +161,34 @@ enum NodeHost {
         }
     }
 
+    /// 把一个标准流接到文件；**失败时必须兜底到 /dev/null**。
+    ///
+    /// C 的语义是 `freopen` **先关掉**原来的流，失败时返回 NULL 且流保持关闭。
+    /// 于是丢掉返回值 = 有可能留下一个已关闭的 fd 1。而 Node 在
+    /// `PlatformInit` 里校验 0/1/2，无效就当场 abort：
+    ///
+    ///     node::PlatformInit(...) at ../src/node.cc:623
+    ///     Assertion failed: (err) == (0)
+    ///
+    /// 症状极具误导性：Node 线程死掉、**app 进程还活着**、端口永远不开，
+    /// 外壳只能报"dsh 没能启动"；而重启一次就好了。实测发生在**装完包后的
+    /// 第一次启动**——iOS 每次安装都换数据容器 UUID，那一刻 Documents
+    /// 还没就位，`freopen` 失败。为这个症状先后错误归因过两次
+    /// （"装包和拉起抢容器"、"自检拖慢启动"），真因是这里丢掉的返回值。
+    ///
+    /// 兜底到 /dev/null 是有意的取舍：宁可这一轮的日志丢了，
+    /// 也不能留一个关闭的标准 fd 把整个 Node 带走。
+    @discardableResult
+    private static func redirect(
+        _ stream: UnsafeMutablePointer<FILE>,
+        to url: URL,
+        mode: String,
+    ) -> Bool {
+        if freopen(url.path, mode, stream) != nil { return true }
+        _ = freopen("/dev/null", "w", stream)
+        return false
+    }
+
     /// 在后台线程上启动 Node。重复调用是空操作。
     ///
     /// 返回 false 表示 bundle 里没有 Node 侧代码——那是打包问题，不是运行时问题，
@@ -247,10 +275,19 @@ enum NodeHost {
         let t = Thread {
             // stdout 与 stderr 都重定向到日志文件，理由见 hostLogURL。
             let log = hostLogURL
+            try? FileManager.default.createDirectory(
+                at: log.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+            )
             try? FileManager.default.removeItem(at: log)
-            freopen(log.path, "w", stdout)
-            freopen(log.path, "a", stderr)
+            let outOK = redirect(stdout, to: log, mode: "w")
+            let errOK = redirect(stderr, to: log, mode: "a")
             setvbuf(stdout, nil, _IOLBF, 0)   // 行缓冲，崩溃时也能留下已写的部分
+            if !outOK || !errOK {
+                // 日志文件这时是不可用的，所以只能走系统日志。
+                NSLog("[NodeHost] 日志重定向失败，已兜底到 /dev/null（stdout=%d stderr=%d）",
+                      outOK, errOK)
+            }
 
             // argv 必须在 node::Start 的整个生命周期内有效，所以在这里持有它，
             // 不要用会被回收的临时缓冲。

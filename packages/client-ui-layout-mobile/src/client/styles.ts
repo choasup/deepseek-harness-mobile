@@ -186,6 +186,31 @@ const CSS = `
   [class*='Tooltip'] {
     display: none !important;
   }
+
+  /* 行内操作在触屏上必须常显。
+
+     dsh 的侧栏把每行的操作放在一个 display:none 的容器里，靠
+     \`:hover\` 或 \`.menuOpen\` 放成 inline-flex。触屏**两个条件都不成立**，
+     于是手机上重命名、删除会话、在某个工作区里新建会话——全都没有入口，
+     按钮实测是 0×0。
+
+     **选择器用结构而不是类名**：那些类名是 CSS-module 哈希
+     （YDXeBa_rowActions 这种），dsh 每次构建都会变。而"treeitem 的直接
+     子元素、内部含按钮"这个关系稳定得多；实测它精确命中 7 个操作容器，
+     行标签、时间戳之类一个都没误伤。
+
+     用 !important 是因为要盖的是别的包的基础规则，而我们无法预知它下次
+     构建后的选择器权重。 */
+  .dshm-drawer [role='treeitem'] > :has(button) {
+    display: inline-flex !important;
+  }
+
+  /* 那些图标按钮是 16×16，对手指太小。行高 34px，撑到 28 是塞得下的上限
+     ——HIG 推荐的 44 会把整行挤变形，这里取能做到的最好值而不是照搬数字。 */
+  .dshm-drawer [role='treeitem'] > :has(button) button {
+    min-width: 28px;
+    min-height: 28px;
+  }
 }
 
 /* ── 设置对话框的窄屏降级 ────────────────────────────────────────────

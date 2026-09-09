@@ -261,3 +261,76 @@ export async function runAttachmentSelfTest(log) {
 
   return failures === 0
 }
+
+/** 向原生桥发一个 POST，返回解析后的 JSON。 */
+async function bridgeJson(path) {
+  const http = await import('node:http')
+  const body = await new Promise((resolve, reject) => {
+    const req = http.request(
+      new URL(path, process.env.DSH_NATIVE_BRIDGE),
+      { method: 'POST', headers: { 'content-length': 0 } },
+      (res) => {
+        const chunks = []
+        res.on('data', (c) => chunks.push(c))
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`HTTP ${res.statusCode}: ${Buffer.concat(chunks).toString('utf8').slice(0, 200)}`))
+            return
+          }
+          resolve(Buffer.concat(chunks).toString('utf8'))
+        })
+      },
+    )
+    req.on('error', reject)
+    req.setTimeout(15_000, () => req.destroy(new Error('超时')))
+    req.end()
+  })
+  return JSON.parse(body)
+}
+
+/**
+ * 传感器自检。
+ *
+ * ## 为什么它只读一部分传感器
+ *
+ * 气压计、计步、活动识别都要「运动与健身」授权，定位要定位授权。**启动时弹
+ * 权限框是不能接受的**——用户还没让 agent 干任何事，凭什么弹框。所以自检只跑
+ * 不触发授权的那几项：inventory（纯查询）、device、battery、motion
+ * （CMMotionManager 的加速度计/陀螺仪/姿态融合不需要授权）。
+ *
+ * 覆盖不到的是"授权之后能不能读到数"，能覆盖的是桥的接线、路由、JSON 形状、
+ * 以及采样这条主路——也就是改坏了会静默失效的那些部分。
+ *
+ * ## 为什么要有它
+ *
+ * 相机的教训：那条路上连续四个 bug，没有一个的错误信息指向真因，每一个都要
+ * 用户拍一次照才暴露。传感器同样没有别的入口能替它把这条链走一遍。
+ */
+export async function runSensorSelfTest(log) {
+  if (process.env.DSH_NATIVE_BRIDGE === undefined) return true
+  try {
+    const inventory = await bridgeJson('/sensors/inventory')
+    const rows = inventory.sensors ?? []
+    const usable = rows.filter((s) => s.available).map((s) => s.name)
+    const missing = rows.filter((s) => !s.available).map((s) => `${s.name}(${s.reason ?? '?'})`)
+    log(`[sensor-selftest] 清单：可用 ${usable.join('/')}；不可用 ${missing.join('、') || '无'}`)
+
+    // 只点这三项：其余会弹权限框。
+    const { readings } = await bridgeJson('/sensors/read?kinds=device,battery,motion')
+    let failures = 0
+    for (const [name, value] of Object.entries(readings)) {
+      if (value?.available === true) {
+        log(`[sensor-selftest] ${name} ok: ${JSON.stringify(value).slice(0, 160)}`)
+      } else {
+        // 读不到不一定是 bug（模拟器就没有陀螺仪），但要说出来，
+        // 而不是让它悄悄消失。
+        failures += 1
+        log(`[sensor-selftest] ${name} 读不到: ${value?.reason ?? '没有 reason 字段'}`)
+      }
+    }
+    return failures === 0
+  } catch (error) {
+    log(`[sensor-selftest] 失败: ${describeError(error)}`)
+    return false
+  }
+}

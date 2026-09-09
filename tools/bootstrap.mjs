@@ -106,9 +106,14 @@ if (process.env.DSH_NATIVE_BRIDGE) {
     // **不 await**：这一趟要解四张 2100 像素宽的图，会给启动加上几秒。
     // 它是诊断，不是启动的前置条件；让它和 dsh 的加载并行跑、跑完再记日志。
     import('./bridge-selftest.mjs')
-      .then((selftest) => selftest.runAttachmentSelfTest((line) => console.log(line)))
-      .then((ok) => console.log(`[bridge-selftest] 附件归一化自检${ok ? '全部通过' : '有失败项'}`))
-      .catch((error) => console.log(`[bridge-selftest] 附件归一化自检没跑起来: ${error?.stack ?? error}`))
+      .then(async (selftest) => {
+        const ok = await selftest.runAttachmentSelfTest((line) => console.log(line))
+        console.log(`[bridge-selftest] 附件归一化自检${ok ? '全部通过' : '有失败项'}`)
+        // 传感器同样没有别的入口能替它把链走一遍，见 runSensorSelfTest。
+        const sensorOk = await selftest.runSensorSelfTest((line) => console.log(line))
+        console.log(`[sensor-selftest] 传感器自检${sensorOk ? '通过' : '有失败项'}`)
+      })
+      .catch((error) => console.log(`[bridge-selftest] 自检没跑起来: ${error?.stack ?? error}`))
 
     // 大 body 专项：相机照片是几百 KB，而上面那张 PNG 只有几十字节。
     // 相机路由（空 body）是通的、metadata（小 body）也是通的，唯独真实照片失败

@@ -1,8 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-// 类型侧的服务扩展：不显式 import 就拿不到 ctx.attachments 的类型。
-// 运行时不产生任何导入（类型导入会被擦除）。
-import type {} from '@deepseek-ai/dsh-attachment'
+// AttachmentId 是**运行时**导入：要把 image 块交给模型，就得给它一个合法的
+// ImageAttachmentRef，而 attachmentId 是个带品牌的类型。dsh 自己的 read_image
+// 走的也是这条路（dsh-tool-fs 的 imageRefFromValue）。
+// 顺带这个 import 也带来了 ctx.attachments 的类型扩展。
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 
 /**
  * `take_photo`：让模型请求用设备的相机拍一张照片。
@@ -62,23 +64,56 @@ export function apply(ctx: Context): void {
             properties: {
               attachmentId: { type: 'string', required: true },
               mediaType: { type: 'string', required: true },
+              // bytes 不是可有可无的：ImageAttachmentRef 要求它，
+              // 少了它就拼不出交给模型的 image 块。
+              bytes: { type: 'number', required: true },
               width: { type: 'number', required: true },
               height: { type: 'number', required: true },
             },
           },
         },
       },
-      // 模型看到的文本。取消时说清楚是**用户主动取消**，不是失败——
-      // 否则模型会把它当成故障去重试，反复骚扰用户。
-      render: (_args: unknown, value: CaptureResult) => [
-        {
-          type: 'text' as const,
-          text: value.cancelled
-            ? 'The user cancelled the photo capture. Do not retry unless they ask.'
-            : `Photo captured: ${value.image?.width}x${value.image?.height} ` +
-              `${value.image?.mediaType}, attachment ${value.image?.attachmentId}`,
-        },
-      ],
+      /**
+       * 交给模型的内容。
+       *
+       * **必须返回 image 块，不能只报一个 attachment id。** 早先这里只有一个
+       * text 块，写着 "attachment sha256:…"——照片确实拍了、也确实入库了，
+       * 但模型手上只有一个字符串，没有任何办法把它变成看得见的图。
+       * 用户的说法是"拍照完了，但是 dsh 检索不到"。
+       *
+       * dsh 自己的 read_image 就是返回两块：一段文字信封 + 一个 image 块
+       * （dsh-tool-fs 的 imageReadContent）。这里照同一个约定。
+       *
+       * 取消时说清楚是**用户主动取消**，不是失败——否则模型会把它当故障
+       * 去重试，反复骚扰用户。
+       */
+      render: (_args: unknown, value: CaptureResult) => {
+        if (value.cancelled || value.image === undefined) {
+          return [
+            {
+              type: 'text' as const,
+              text: 'The user cancelled the photo capture. Do not retry unless they ask.',
+            },
+          ]
+        }
+        const image = value.image
+        return [
+          {
+            type: 'text' as const,
+            text: `Photo captured with the device camera: ${image.width}x${image.height} ${image.mediaType}.`,
+          },
+          {
+            type: 'image' as const,
+            attachment: {
+              attachmentId: AttachmentId(image.attachmentId),
+              mediaType: image.mediaType as never,
+              bytes: image.bytes,
+              width: image.width,
+              height: image.height,
+            },
+          },
+        ]
+      },
     },
     async execute(args: { reason?: string }): Promise<CaptureResult> {
       void args
@@ -127,6 +162,7 @@ export function apply(ctx: Context): void {
         image: {
           attachmentId: ref.attachmentId,
           mediaType: ref.mediaType,
+          bytes: ref.bytes,
           width: ref.width,
           height: ref.height,
         },
@@ -138,13 +174,27 @@ export function apply(ctx: Context): void {
 
 interface CaptureResult {
   cancelled: boolean
-  image?: { attachmentId: string; mediaType: string; width: number; height: number }
+  image?: {
+    attachmentId: string
+    mediaType: string
+    bytes: number
+    width: number
+    height: number
+  }
 }
 
+/**
+ * `ctx.attachments` 的最小面。手写而不是从 dsh-attachment 导入，是因为那边的
+ * 类型挂在 cordis 的服务扩展上，这个包只用得到一个方法。
+ *
+ * **字段要和 ImageAttachmentRef 对齐**：少写一个 `bytes`，代价不是类型不严谨，
+ * 而是拼不出交给模型的 image 块——照片存进去了、模型却看不见。
+ */
 interface Attachments {
   saveImage(input: { data: Buffer; mediaType: string; name?: string }): Promise<{
     attachmentId: string
     mediaType: string
+    bytes: number
     width: number
     height: number
   }>

@@ -1,20 +1,31 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { cls } from './styles.ts'
+import type { MobileTab } from './store.ts'
 import type { PanelActions } from './types.ts'
 
 /**
- * 移动端的单栏外框，注册进内置的 `root` slot（web shell 只渲染 root）。
+ * 移动端外框，注册进内置的 `root` slot（web shell 只渲染 root）。
  *
- * 布局：顶栏（菜单键）+ 会话列铺满；侧栏是左侧抽屉，详情是底部 sheet，
- * 两者都用 transform 移出屏幕而不卸载，占位插件的内部状态因此保留。
+ * ## 导航模型：底部 Tab 栏，不是侧边抽屉
  *
- * 跟桌面版 AppFrame 一样是**纯组件**：所有输入都从框架的三份 share 来
- * （useStore / useSessions / actions / renderSlot），不 import cordis，
- * 不自造 hook。
+ * 旧版把桌面的三栏压成"单栏 + 左侧抽屉"，关键操作全在屏幕顶部——重设计要
+ * 解决的五个问题里，"单手可达性差"和"桌面组件硬塞进手机"都指向这里。
+ * 现在导航在**底部**：会话 / 环境两个 Tab，拇指够得到。
+ *
+ * **进入某个会话时 Tab 栏整体退出**（下移 + 淡出），顶栏换成返回键——
+ * 会话页的底部要留给输入条，两者不能同时占着。这也是 iOS 上"列表 → 详情"
+ * 的常规形态。
+ *
+ * ## 仍然是纯组件
+ *
+ * 所有输入都从框架的三份 share 来（useStore / useSessions / actions /
+ * renderSlot），不 import cordis、不自造 hook——与桌面版 AppFrame 同一约定。
  */
 
 interface FrameProps {
-  useStore: <T>(selector: (state: { drawer: boolean; details: boolean }) => T) => T
+  useStore: <T>(
+    selector: (state: { tab: MobileTab; details: boolean; view: 'list' | 'conversation' }) => T,
+  ) => T
   useSessions: <T>(
     selector: (state: { current?: string; byId: Record<string, { blank: boolean }> }) => T,
   ) => T
@@ -22,12 +33,12 @@ interface FrameProps {
   renderSlot: (name: string, owner: Record<string, unknown>) => React.ReactNode
 }
 
-/** 三横线菜单图标。inline SVG——这个包不引任何图标库。 */
-function MenuIcon() {
+/** 会话 Tab 图标。inline SVG——这个包不引任何图标库。 */
+function SessionsIcon() {
   return (
-    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+    <svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path
-        d="M3 5.5h14M3 10h14M3 14.5h14"
+        d="M4 6.5h16M4 12h16M4 17.5h10"
         stroke="currentColor"
         strokeWidth="1.6"
         strokeLinecap="round"
@@ -37,141 +48,224 @@ function MenuIcon() {
   )
 }
 
-export function MobileAppFrame({ useStore, useSessions, actions, renderSlot }: FrameProps) {
-  const drawer = useStore((s) => s.drawer)
-  const details = useStore((s) => s.details)
+/** 环境 Tab 图标：一台机器。 */
+function EnvIcon() {
+  return (
+    <svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect
+        x="3.2"
+        y="5"
+        width="17.6"
+        height="10.5"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        fill="none"
+      />
+      <path d="M8 19h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M12 15.5V19" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
 
+/** 返回键。 */
+function BackIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M15 4.5 7.5 12l7.5 7.5"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
+  )
+}
+
+const TABS: { id: MobileTab; label: string; icon: () => React.ReactElement }[] = [
+  { id: 'sessions', label: '会话', icon: SessionsIcon },
+  { id: 'env', label: '环境', icon: EnvIcon },
+]
+
+export function MobileAppFrame({ useStore, useSessions, actions, renderSlot }: FrameProps) {
+  const tab = useStore((s) => s.tab)
+  const details = useStore((s) => s.details)
+  const view = useStore((s) => s.view)
+
+  const currentSession = useSessions((s) => s.current)
   // 详情 sheet 只在有"非空白"当前会话时才有内容可显示，与桌面版同一判据。
   const detailsSession = useSessions((s) => {
     const current = s.current
     return current !== undefined && s.byId[current]?.blank === false ? current : undefined
   })
 
-  // **关抽屉要看"当前会话是谁"，不能看 detailsSession。**
-  //
-  // detailsSession 对**所有空白会话**都是 undefined（那是它的用途：详情面板
-  // 没内容可显示）。拿它当依赖，等于"在空白会话之间切换"不算切换——
-  // 抽屉不关，用户看到的就是"点了没反应"。
-  const currentSession = useSessions((s) => s.current)
+  const inConversation = view === 'conversation'
 
-  // 切换会话时收起两个覆盖层：留着上一会话的详情是错的内容，
-  // 而抽屉在选完会话后就该让路给内容——这也是移动端选完即关的常规行为。
+  // 用户**选中一个会话**时进入会话页——判据是"current 变了"，不是"current 有值"。
+  // 后者会让返回键失效：返回不该清除当前会话，而会话一直有值。
+  // 首次挂载不算：dsh 启动时会自动选一个会话，那不是用户的导航动作。
+  const previousSession = useRef<string | undefined>(undefined)
+  const mounted = useRef(false)
   useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true
+      previousSession.current = currentSession
+      return
+    }
+    if (currentSession === previousSession.current) return
+    previousSession.current = currentSession
     actions.closeDetails()
-    actions.closeSidebar()
+    if (currentSession !== undefined) actions.openConversation()
   }, [actions, currentSession])
 
-  /**
-   * 抽屉里的操作做完就收起抽屉。
-   *
-   * **只靠上面那个 effect 是不够的**：点"新建会话"时，如果当前已经是一个空白
-   * 会话，dsh 会复用它——实测那一下连建会话的请求都不发，只有一条
-   * `subagent.list`。也就是说 `current` 根本没变，任何依赖状态变化的写法都
-   * 收不了抽屉。而用户看到的是抽屉盖着屏幕、点多少次都一样，"开不了新会话"。
-   *
-   * 所以判据换成"用户在抽屉里操作过"，而不是"状态变了"。三类东西不算操作完成：
-   *
-   * - 被激活的控件**自身**带 `aria-expanded` / `aria-haspopup`：展开收起分组、
-   *   搜索开关、菜单触发——用户还在这里翻。
-   *
-   *   **必须看控件自身，不能从点击点 `closest()` 一路往上找。** "在某工作区里
-   *   新建会话"那个按钮就嵌在带 `aria-expanded` 的分组行里，往上找会命中分组、
-   *   把它误判成展开操作——正是要修的那个 bug 的另一半。
-   * - 输入框：同上。
-   * - 这一下**新打开了菜单**：dsh 的行内菜单是 portal 到 body 的
-   *   （不在抽屉里），点开之后 DOM 才有 `[role="menu"]`，点击那一刻还看不出来。
-   *   所以推到下一个宏任务再判断——React 对离散事件是同步 flush 的，
-   *   那时菜单已经在 DOM 里了。
-   *
-   *   **比的是数量差，不是"现在有没有菜单"。** 早先写成后者，结果是：上一次
-   *   操作留下的菜单还开着时，之后每一次点击都被当成"正在开菜单"而不收抽屉。
-   *   要判断的是这一下做了什么，不是此刻屏幕上有什么。
-   *
-   *   **只认菜单，不认对话框。** 对话框是模态的、盖住整屏，抽屉在它后面开着
-   *   没有影响；而它出现的时机是异步的（新建会话时那个"添加 API Key"弹窗
-   *   就晚一拍），拿它当判据会让"收不收抽屉"变成一场竞态。
-   */
-  const onDrawerActivate = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      const target = event.target as HTMLElement | null
-      if (target === null) return
-      if (target.closest('input, textarea, select, [contenteditable="true"]') !== null) return
-      const control = target.closest('button, a, [role="treeitem"], [role="menuitem"]')
-      if (control === null) return
-      if (control.hasAttribute('aria-expanded') || control.hasAttribute('aria-haspopup')) return
-      const openMenus = () => document.querySelectorAll('[role="menu"]').length
-      const before = openMenus()
-      setTimeout(() => {
-        if (openMenus() > before) return
-        actions.closeSidebar()
-      }, 0)
-    },
-    [actions],
-  )
-
-  const closeAll = useCallback(() => {
-    actions.closeSidebar()
+  const closeSheet = useCallback(() => {
     actions.closeDetails()
   }, [actions])
 
-  // 安卓返回键 / iOS 侧滑返回会走 popstate。有覆盖层时先关覆盖层，
+  // 安卓返回键 / iOS 侧滑返回会走 popstate。有 sheet 时先关 sheet，
   // 而不是让 WebView 退出当前页——移动端对"返回"的期待就是这样。
   useEffect(() => {
-    if (!drawer && !details) return
-    const onPop = () => closeAll()
+    if (!details) return
+    const onPop = () => closeSheet()
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [closeAll, drawer, details])
+  }, [closeSheet, details])
 
   const detailsOpen = details && detailsSession !== undefined
 
   return (
     <div
       className={cls.frame}
-      data-drawer={drawer ? 'open' : undefined}
       data-details={detailsOpen ? 'open' : undefined}
+      data-conversation={inConversation ? 'open' : undefined}
     >
       <div className={cls.topbar}>
-        <button
-          type="button"
-          className={cls.menuButton}
-          onClick={actions.toggleSidebar}
-          aria-label="打开导航"
-          aria-expanded={drawer}
-        >
-          <MenuIcon />
-        </button>
+        {inConversation ? (
+          <button
+            type="button"
+            className={cls.backButton}
+            onClick={actions.backToList}
+            aria-label="返回"
+          >
+            <BackIcon />
+          </button>
+        ) : (
+          <span className={cls.pageTitle}>{tab === 'sessions' ? '会话' : '环境'}</span>
+        )}
       </div>
 
-      <div className={cls.center}>{renderSlot('conversation', {})}</div>
-
-      {/* 点遮罩关闭。抽屉和 sheet 共用一层，同时只会有一个是开的。 */}
-      <div className={cls.scrim} onClick={closeAll} aria-hidden="true" />
-
       {/*
-        侧栏占位者（ui-sidebar 的 SidebarRoot）拿到的永远是 collapsed:false。
-        它的契约是"collapsed 时渲染紧凑控制条"，而抽屉里要的是完整侧栏——
-        关上的时候整个抽屉被 transform 移出屏幕，根本不需要那条控制条。
+        会话页与 Tab 页共存于同一棵树、用显示与否切换，而不是卸载重建：
+        占位插件（ui-sidebar、ui-conversation）的内部状态因此在来回切换之间
+        保留，跟桌面版"width 0 但子树仍挂载"是同一个约定。
       */}
-      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions -- 冒泡监听，不是可聚焦控件；键盘路径由抽屉内各控件自己负责 */}
-      <div className={cls.drawer} onClick={onDrawerActivate}>
+      <div className={cls.center} hidden={!inConversation}>
+        {renderSlot('conversation', {})}
+      </div>
+
+      <div className={cls.tabPage} hidden={inConversation || tab !== 'sessions'}>
         {renderSlot('sidebar', { collapsed: false, width: 320 })}
       </div>
 
-      <div className={cls.sheet}>
-        <div
-          className={cls.sheetGrip}
-          onClick={actions.closeDetails}
-          role="button"
-          tabIndex={0}
-          aria-label="收起详情"
-        />
-        <div className={cls.sheetBody}>{renderSlot('details', {})}</div>
+      <div className={cls.tabPage} hidden={inConversation || tab !== 'env'}>
+        {renderSlot('env', {})}
       </div>
+
+      {/* 会话内页不显示 Tab 栏——底部要留给输入条。 */}
+      <nav className={cls.tabbar} hidden={inConversation} aria-label="主导航">
+        {TABS.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            type="button"
+            className={cls.tabItem}
+            data-active={tab === id ? 'true' : undefined}
+            aria-current={tab === id ? 'page' : undefined}
+            onClick={() => actions.selectTab(id)}
+          >
+            <Icon />
+            <span className={cls.tabLabel}>{label}</span>
+          </button>
+        ))}
+      </nav>
+
+      <div className={cls.scrim} onClick={closeSheet} aria-hidden="true" />
+      <DetailsSheet open={detailsOpen} onClose={closeSheet}>
+        {renderSlot('details', {})}
+      </DetailsSheet>
 
       <div className={cls.overlay} data-shell-overlay>
         {renderSlot('shell.overlay', {})}
       </div>
+    </div>
+  )
+}
+
+/**
+ * 底部详情 sheet，**支持下拉关闭**。
+ *
+ * 下拉手势是重设计点名要补的：只能点抓手关闭是现状的已知缺陷，而在手机上
+ * 「往下甩」是关闭底部面板的默认预期，没有它就得去够那个小抓手。
+ *
+ * 用 pointer 事件而不是 touch：同一套代码在带触控的桌面浏览器上也能测，
+ * 而调试正是在那儿做的。
+ */
+function DetailsSheet({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean
+  onClose: () => void
+  children: React.ReactNode
+}) {
+  const [drag, setDrag] = useState(0)
+  const start = useRef<number | undefined>(undefined)
+
+  // 关上之后要把位移清零，否则下次打开会带着上次的偏移弹出来。
+  useEffect(() => {
+    if (!open) setDrag(0)
+  }, [open])
+
+  const onPointerDown = useCallback((event: React.PointerEvent) => {
+    start.current = event.clientY
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }, [])
+
+  const onPointerMove = useCallback((event: React.PointerEvent) => {
+    if (start.current === undefined) return
+    // 只跟随向下的位移：往上拖不该把 sheet 拉高，那会露出底下的内容。
+    setDrag(Math.max(0, event.clientY - start.current))
+  }, [])
+
+  const onPointerUp = useCallback(() => {
+    if (start.current === undefined) return
+    start.current = undefined
+    // 阈值取 88px：比误触大得多，又比"必须甩到底"轻松。低于它就弹回去。
+    setDrag((value) => {
+      if (value > 88) onClose()
+      return 0
+    })
+  }, [onClose])
+
+  return (
+    <div
+      className={cls.sheet}
+      style={drag > 0 ? { transform: `translateY(${drag}px)`, transition: 'none' } : undefined}
+    >
+      <div
+        className={cls.sheetGrip}
+        onClick={onClose}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        role="button"
+        tabIndex={0}
+        aria-label="收起详情"
+      />
+      <div className={cls.sheetBody}>{children}</div>
     </div>
   )
 }

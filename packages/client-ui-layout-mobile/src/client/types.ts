@@ -22,11 +22,22 @@ export type ConvOwnerProps = Record<string, never>
 /** 详情列 owner share：空的，sessionId 由框架按 scope 注入。 */
 export type DetailsOwnerProps = Record<string, never>
 
+/** 「环境」Tab 的 owner share：空的，内容由占位者自取。 */
+export type EnvOwnerProps = Record<string, never>
+
 /** 布局 store 的 bound action 集合。 */
 export interface PanelActions {
-  toggleSidebar(): void
+  selectTab(tab: 'sessions' | 'env'): void
+  openConversation(): void
+  backToList(): void
   openDetails(): void
   closeDetails(): void
+  /**
+   * 没有抽屉之后这两个的语义变了，但**必须保留**：dsh 的其他插件按
+   * `ILayout` 契约调它们，删掉不会编译报错，只会在运行时静默失效。
+   * toggleSidebar = 回到会话 Tab（也就是会话页的"返回"）。
+   */
+  toggleSidebar(): void
   closeSidebar(): void
 }
 

@@ -29,6 +29,10 @@ export function apply(ctx: ClientContext): void {
         name: 'root',
         children: {
           sidebar: { kind: 'single', scope: 'root' },
+          // 「环境」Tab 的坑位：机器、探针、GitHub 仓库都落在这里。
+          // 声明在这一层而不是插件里，是因为**声明等于独占渲染权**——
+          // 外框要先把这一格留出来，占位者才有地方注册。
+          env: { kind: 'single', scope: 'root' },
           conversation: { kind: 'single', scope: 'session-maybe' },
           details: { kind: 'single', scope: 'session' },
           'shell.overlay': { kind: 'list', scope: 'root' },

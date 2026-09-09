@@ -59,7 +59,19 @@ cat > profiles/mobile-web/package.json <<JSON
   }
 }
 JSON
-printf '[]\n' > profiles/mobile-web/cordis.patch.yml
+# profile 级补丁：**只有这一层能假设"机器已经配好"**。
+#
+# tool-bash 是 ctx.shell 的纯消费者，而 ctx.shell 由 shell-ssh 在找到已注册
+# 机器后才提供。bundle 补丁是所有安装共享的默认值，在那里打开会让任何没有
+# 机器的安装整棵树装载失败（Mac 上的开发 profile 实测复现过）。
+#
+# 设备上不一样：remote-bootstrap 在启动时按 remote-machines.json 注册机器，
+# 前提成立，所以在这一层打开。没有机器时把这一段删掉即可。
+cat > profiles/mobile-web/cordis.patch.yml <<'PATCH'
+# bash 跑在远程机器上（shell-ssh 提供 ctx.shell）。手机本地不能 fork/exec。
+- id: tool-bash
+  disabled: false
+PATCH
 
 # 本地包必须**一次装齐**。`npm install --no-save <path>` 逐个装是错的：
 # 每次安装都会把不在 package.json 里的包剪掉，结果只剩最后一个。

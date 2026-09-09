@@ -10,10 +10,13 @@
 export const cls = {
   frame: 'dshm-frame',
   topbar: 'dshm-topbar',
-  menuButton: 'dshm-menu',
-  title: 'dshm-title',
+  backButton: 'dshm-back',
+  pageTitle: 'dshm-page-title',
   center: 'dshm-center',
-  drawer: 'dshm-drawer',
+  tabPage: 'dshm-tabpage',
+  tabbar: 'dshm-tabbar',
+  tabItem: 'dshm-tab',
+  tabLabel: 'dshm-tab-label',
   scrim: 'dshm-scrim',
   sheet: 'dshm-sheet',
   sheetGrip: 'dshm-sheet-grip',
@@ -37,41 +40,43 @@ const CSS = `
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: none;
-  padding-top: env(safe-area-inset-top);
-  padding-left: max(4px, env(safe-area-inset-left));
-  padding-right: max(4px, env(safe-area-inset-right));
+  flex: 0 0 auto;
+  /* 设计稿：padding 56px 12px 10px。56 里含状态栏，所以用安全区变量兜住
+     刘海与灵动岛，env() 拿不到时退回 56-12=44 的近似值。 */
+  padding: calc(env(safe-area-inset-top, 12px) + 12px) 12px 10px;
   border-bottom: 1px solid var(--dsw-alias-border-l1);
-  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-base));
+  background: var(--dsw-alias-bg-base);
 }
 
-/* 44x44 是 iOS HIG 的最小触控目标；桌面版的把手是 8px 宽，手指点不中。 */
-.dshm-menu {
+/* 返回键与 Tab 项一样按 44×44 的触控目标做——iOS HIG 的下限，
+   而这一版的核心诉求之一就是"关键操作要够得着"。 */
+.dshm-back {
   width: 44px;
   height: 44px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border: 0;
+  margin-left: -10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
   padding: 0;
-  background: transparent;
-  color: var(--dsw-alias-text-1, currentColor);
-  border-radius: 8px;
   cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-.dshm-menu:active { background: var(--dsw-alias-fill-2, rgba(127, 127, 127, .18)); }
-
-.dshm-title {
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--dsw-alias-text-1, currentColor);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  border-radius: 12px;
 }
 
-.dshm-center {
+/* 页面大标题：28/34 600，字距收紧一点（设计稿 letter-spacing:-.01em）。 */
+.dshm-page-title {
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--dsw-alias-label-primary);
+  padding: 2px 8px 6px;
+}
+
+.dshm-center,
+.dshm-tabpage {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -79,30 +84,46 @@ const CSS = `
   overflow: hidden;
 }
 
-/* 抽屉与 sheet 都用 transform 移出屏幕，而不是卸载——占位插件（ui-sidebar、
-   ui-conversation 的 DetailsPanel）的内部状态因此在开合之间保留，
-   跟桌面版"width 0 但子树仍挂载"是同一个约定。 */
-.dshm-drawer {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: min(84vw, 320px);
-  z-index: 30;
+/* 底部 Tab 栏。
+   导航放底部是这一版的主张：拇指区在屏幕下半部，而旧版把入口全放在顶栏。
+   会话内页会整体隐藏它（[hidden]），底部让给输入条。 */
+.dshm-tabbar {
+  flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
-  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-base));
-  border-right: 1px solid var(--dsw-alias-border-l1);
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: env(safe-area-inset-left);
-  transform: translateX(-100%);
-  visibility: hidden;
-  transition: transform var(--ds-transition-duration-slow, .24s) var(--ds-ease-in-out, ease),
-              visibility 0s linear var(--ds-transition-duration-slow, .24s);
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+  padding: 8px 12px 0;
+  /* home indicator 的空间：设计稿给 26px，用安全区兜住没有指示条的机型。 */
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 8px);
 }
-.dshm-frame[data-drawer='open'] .dshm-drawer {
-  transform: translateX(0);
-  visibility: visible;
-  transition: transform var(--ds-transition-duration-slow, .24s) var(--ds-ease-in-out, ease);
+
+.dshm-tab {
+  flex: 1;
+  min-height: 44px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 0 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--dsw-alias-label-caption);
+}
+
+.dshm-tab[data-active='true'] {
+  color: var(--dsw-alias-button-info-fill);
+}
+
+.dshm-tab-label {
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 500;
+}
+
+.dshm-tab[data-active='true'] .dshm-tab-label {
+  font-weight: 600;
 }
 
 .dshm-sheet {
@@ -155,11 +176,6 @@ const CSS = `
   pointer-events: none;
   transition: opacity var(--ds-transition-duration-slow, .24s) var(--ds-ease-in-out, ease);
 }
-.dshm-frame[data-drawer='open'] .dshm-scrim,
-.dshm-frame[data-details='open'] .dshm-scrim {
-  opacity: 1;
-  pointer-events: auto;
-}
 
 /* 与桌面版同名同语义的整框浮层：默认穿透，条目自己要回指针事件。 */
 .dshm-overlay {
@@ -201,13 +217,13 @@ const CSS = `
 
      用 !important 是因为要盖的是别的包的基础规则，而我们无法预知它下次
      构建后的选择器权重。 */
-  .dshm-drawer [role='treeitem'] > :has(button) {
+  .dshm-tabpage [role='treeitem'] > :has(button) {
     display: inline-flex !important;
   }
 
   /* 那些图标按钮是 16×16，对手指太小。行高 34px，撑到 28 是塞得下的上限
      ——HIG 推荐的 44 会把整行挤变形，这里取能做到的最好值而不是照搬数字。 */
-  .dshm-drawer [role='treeitem'] > :has(button) button {
+  .dshm-tabpage [role='treeitem'] > :has(button) button {
     min-width: 28px;
     min-height: 28px;
   }
@@ -274,7 +290,7 @@ const CSS = `
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dshm-drawer, .dshm-sheet, .dshm-scrim { transition: none; }
+  .dshm-sheet, .dshm-scrim, .dshm-tabbar { transition: none; }
 }
 `
 

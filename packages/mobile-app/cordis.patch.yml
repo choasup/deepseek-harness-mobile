@@ -83,7 +83,20 @@
 # shell-ssh 挪到 tool-bash 身上，而不是真的消除它——这正是这一版改动想避免
 # 的问题，只是换了个位置复现。
 #
-# **2026-09-09：条件已经满足，这一行打开了。**
+# **2026-09-09：这一行仍然保持 disabled，打开的动作挪到 profile 层。**
+#
+# 一度直接在这里改成 enabled，结果是**任何没有注册机器的安装都起不来**——
+# Mac 上的开发 profile 当场复现：
+#     dsh: 1 entry did not activate
+#     @deepseek-ai/dsh-tool-bash: pending (waiting for service: shell)
+# 这正是下面那段注释早就写明的后果。bundle 补丁是所有安装共享的默认值，
+# 不能假设机器已经配好。
+#
+# 打开的位置在 **profile 级** cordis.patch.yml：iOS 的打包脚本会写一份
+# （见 ios/prepare-nodejs-project.sh），因为那一份的前提是
+# remote-bootstrap 已经在启动时注册了机器。
+#
+# 以下是原始说明，仍然成立：
 #
 # `@dsh-mobile/remote-bootstrap`（见 C 段）在启动时把机器注册进 ctx.remotes，
 # `shell-ssh` 随即挂上 executor 并 provide `ctx.shell`，tool-bash 的 inject
@@ -97,7 +110,7 @@
 #
 # **要退回去**：把 disabled 改回 true。判定行显示 ctx.shell 不存在时必须这么做。
 - id: tool-bash
-  disabled: false
+  disabled: true
 
 # 同上一条的理由：Windows 分支的模型侧工具，跟 pwsh-sandbox 一起关。
 - id: tool-pwsh

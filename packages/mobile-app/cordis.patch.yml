@@ -83,13 +83,21 @@
 # shell-ssh 挪到 tool-bash 身上，而不是真的消除它——这正是这一版改动想避免
 # 的问题，只是换了个位置复现。
 #
-# 所以这一行继续保持 disabled，直到有别的机制能在"没有机器"时也让
-# `ctx.shell` 满足 tool-bash 的 inject（同时不违反"永远不要挂一个必错的
-# ctx.shell"这条约束——两者现在互斥，还没有第三种做法）。用户配置好机器后，
-# 在自己的 profile 级 `cordis.patch.yml` 里把这一行改成 enabled 即可——不需要
-# 同时改 `shell-ssh`，那一行现在默认就是 enabled（见 C 段）。
+# **2026-09-09：条件已经满足，这一行打开了。**
+#
+# `@dsh-mobile/remote-bootstrap`（见 C 段）在启动时把机器注册进 ctx.remotes，
+# `shell-ssh` 随即挂上 executor 并 provide `ctx.shell`，tool-bash 的 inject
+# 因此能满足。开之前**先在真机日志里验证过 ctx.shell 确实存在**——那个插件
+# 会在启动 3 秒后打一行判定，没有它就不该动这个开关：ctx.shell 缺席时
+# assertEntriesActivated 会把整棵树判为装载失败，app 连界面都出不来。
+#
+# 这一行打开之后，模型发出的每一条 bash 命令都跑在**远程机器**上
+# （shell-ssh 会往系统提示里注入一段说明，让模型知道那是另一个文件系统和
+# 进程空间）。手机本地仍然不能 fork/exec——那是 iOS 的限制，没有变。
+#
+# **要退回去**：把 disabled 改回 true。判定行显示 ctx.shell 不存在时必须这么做。
 - id: tool-bash
-  disabled: true
+  disabled: false
 
 # 同上一条的理由：Windows 分支的模型侧工具，跟 pwsh-sandbox 一起关。
 - id: tool-pwsh

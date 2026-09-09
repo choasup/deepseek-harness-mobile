@@ -42,7 +42,16 @@ interface MachineSpec {
 interface Remotes {
   list(): Promise<RemoteMachine[]>
   add(machine: RemoteMachine): Promise<void>
+  remove(name: string): Promise<void>
   setPrivateKey(name: string, privateKey: string): Promise<void>
+}
+
+/** 只比清单能表达的字段——registry 归一化过的其余字段不参与判断。 */
+function sameMachine(current: RemoteMachine, spec: MachineSpec): boolean {
+  return current.host === spec.host
+    && current.port === spec.port
+    && current.user === spec.user
+    && (current.defaultWorkdir ?? undefined) === (spec.defaultWorkdir ?? undefined)
 }
 
 export function apply(ctx: Context): void {
@@ -69,9 +78,18 @@ async function register(ctx: Context, home: string): Promise<void> {
   if (!Array.isArray(specs) || specs.length === 0) return
 
   const remotes = (ctx as unknown as { remotes: Remotes }).remotes
-  const existing = new Set((await remotes.list()).map((machine) => machine.name))
+  const existing = new Map((await remotes.list()).map((machine) => [machine.name, machine]))
 
   for (const spec of specs) {
+    // **清单是唯一事实来源，记录跟它对账。** registry 只有 add/remove，
+    // 没有 update；不对账的话，第一次用错端口注册进去之后，改配置文件
+    // 永远不生效——而症状是"连不上"，跟配置错得毫无关系。
+    const current = existing.get(spec.name)
+    if (current !== undefined && !sameMachine(current, spec)) {
+      await remotes.remove(spec.name)
+      existing.delete(spec.name)
+      console.log(`[remote-bootstrap] ${spec.name} 的记录与清单不一致，已删除待重建`)
+    }
     if (!existing.has(spec.name)) {
       await remotes.add({
         name: spec.name,
@@ -101,4 +119,30 @@ async function register(ctx: Context, home: string): Promise<void> {
     await rm(keyFile, { force: true })
     console.log(`[remote-bootstrap] ${spec.name} 的私钥已导入凭据库，投递文件已删除`)
   }
+
+  // **开 tool-bash 之前必须先确认这个。**
+  //
+  // tool-bash 是 ctx.shell 的纯消费者（inject: ['tools','shell',…]）。
+  // ctx.shell 不存在时把它设成 enabled，assertEntriesActivated 会把它的
+  // PENDING 当成整棵插件树装载失败——那时 app 连界面都出不来，日志也读不到。
+  // 所以先把这个事实写进日志：有它才动那个开关。
+  //
+  // 延后一拍再看：shell-ssh 查不到机器时会订阅 domain/changed，等注册完
+  // 才挂上 executor，而那可能发生在这个函数返回之后。
+  setTimeout(() => {
+    // **用 ctx.get()，不要直接读属性。** cordis 对没在 inject 里声明的服务
+    // 会抛 "cannot get property \"shell\" without inject"——而这句在
+    // setTimeout 里，未捕获异常会直接把 Node 进程带走。实测踩过：一个本来
+    // 用来"避免打开 tool-bash 把树搞崩"的探针，自己把进程杀了。
+    //
+    // 整段再包一层 try/catch：诊断探针无论如何都不该有能力影响运行。
+    try {
+      const shell = (ctx as unknown as { get(name: string): unknown }).get('shell')
+      console.log(
+        `[remote-bootstrap] ctx.shell ${shell === undefined ? '不存在——tool-bash 还不能开' : '已就绪，tool-bash 可以开了'}`,
+      )
+    } catch (error) {
+      console.log(`[remote-bootstrap] 查 ctx.shell 时出错（不影响运行）: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, 3000)
 }

@@ -136,10 +136,15 @@ if (typeof WebAssembly === 'undefined') {
           console.log(`[workspace-repair] ${id} 的路径失效且无法对应：${stored}`)
           continue
         }
-        workspace.path = candidate
+        // **必须写规范化路径。** iOS 上 /var 是 /private/var 的符号链接，
+        // 而 dsh 挂载会话时比的是 realpath：写 /var/... 会让它报
+        // "cannot attach ... its cwd resolves to /private/var/..."——
+        // 会话建出来了却挂不上工作区。第一版修复就栽在这里，写回的是
+        // 从 DSH_HOME 拼出来的非规范形式，而原始记录本来是规范的。
+        workspace.path = fs.realpathSync(candidate)
         workspace.updatedAt = new Date().toISOString()
         changed += 1
-        console.log(`[workspace-repair] ${id}: ${stored} → ${candidate}`)
+        console.log(`[workspace-repair] ${id}: ${stored} → ${workspace.path}`)
       }
       if (changed > 0) fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`)
     } catch (error) {

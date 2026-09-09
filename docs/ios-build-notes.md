@@ -749,6 +749,22 @@ iPhone 的照片多是 Display P3，直接编码出来 `space` 就不是 `srgb`�
 命中 JPEG / PNG / 只有 WebP 三条编码分支。见 `tools/bridge-selftest.mjs`。
 自检先在 Mac 上用**真的 sharp** 跑通，确认"自检本身是对的"，再上设备。
 
+**真机确认（2026-09-09，iPhone 17 Pro Max）**，设备日志逐条：
+
+```
+[bridge-selftest] metadata ok: {"format":"png","width":1,"height":1,"hasAlpha":true,
+                  "channels":4,"depth":"uchar","space":"srgb","pages":1,"hasProfile":false}
+[bridge-selftest] 原生可写格式：webp=true
+[bridge-selftest] 照片式 RGB（→ JPEG） ok → image/jpeg 2048×195 443338 字节
+[bridge-selftest] 少色 RGB（→ PNG） ok → image/png 2048×195 6026 字节
+[bridge-selftest] 少色带透明（→ PNG） ok → image/png 2048×195 10766 字节
+[bridge-selftest] 照片式带透明（→ WebP） ok → image/webp 2048×195 288950 字节
+[bridge-selftest] 附件归一化自检全部通过
+```
+
+四条分支的分类与 Mac 上用真 sharp 跑出来的**逐项一致**，最后那条走的是编进
+app 的 libwebp。整份日志 20 行、零错误。
+
 ### iOS 的 ImageIO 能读 WebP，但写不了
 
 `encodingAttemptsAtSize` 对**带透明通道**的图只给一条路：

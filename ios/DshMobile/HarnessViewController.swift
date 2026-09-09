@@ -155,6 +155,48 @@ final class HarnessViewController: UIViewController {
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true,
         ))
+        // ── WebView 的控制台接进 host 日志 ───────────────────────────
+        //
+        // **这是一个真实的盲区，代价已经付过了。** 新会话建不出来时，
+        // dsh 只做一件事：`console.warn('new session failed:', reason)`
+        // （上游注释原话 "Connect failures are non-fatal (console
+        // diagnostics; the current view stays usable)"）。界面上什么都不显示，
+        // 而那行 warn 落在 WebView 的控制台里——我们的 host 日志从不读那儿。
+        // 于是症状是"点了没反应"，排查时手上一条线索都没有，白查了两天。
+        //
+        // 只转发 warn 与 error：info/log 会把 dsh 正常的输出灌满日志。
+        config.userContentController.add(self, name: "consoleRelay")
+        config.userContentController.addUserScript(WKUserScript(
+            source: """
+            for (const level of ['warn', 'error']) {
+              const original = console[level].bind(console)
+              console[level] = (...args) => {
+                try {
+                  const text = args.map((value) => {
+                    if (typeof value === 'string') return value
+                    if (value instanceof Error) return `${value.name}: ${value.message}`
+                    try { return JSON.stringify(value) } catch { return String(value) }
+                  }).join(' ')
+                  window.webkit.messageHandlers.consoleRelay.postMessage(
+                    `${level}: ${text.slice(0, 600)}`,
+                  )
+                } catch {}
+                original(...args)
+              }
+            }
+            window.addEventListener('unhandledrejection', (event) => {
+              try {
+                const reason = event.reason
+                window.webkit.messageHandlers.consoleRelay.postMessage(
+                  `unhandledrejection: ${reason?.stack ?? reason?.message ?? String(reason)}`.slice(0, 600),
+                )
+              } catch {}
+            })
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+        ))
+
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -363,5 +405,16 @@ extension HarnessViewController: WKNavigationDelegate {
         let ns = error as NSError
         if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
         showStartupFailure()
+    }
+}
+
+/// WebView 控制台的接收端：写进 host 日志（stdout 已被重定向到那个文件）。
+extension HarnessViewController: WKScriptMessageHandler {
+    func userContentController(
+        _ controller: WKUserContentController,
+        didReceive message: WKScriptMessage,
+    ) {
+        guard message.name == "consoleRelay", let text = message.body as? String else { return }
+        print("[webview] \(text)")
     }
 }

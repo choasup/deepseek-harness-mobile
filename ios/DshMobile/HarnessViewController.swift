@@ -28,8 +28,21 @@ final class HarnessViewController: UIViewController {
 
     /// host 冷启动的等待上限。超过就当失败并给诊断——一直转圈是最差的失败方式。
     /// Mac 上 jitless 实测 2 秒就绪；给设备留足余量，但不能无限等。
-    private static let startupTimeout: TimeInterval = 45
+    /// 放弃探测前等多久。
+    ///
+    /// **45 秒太短，而且短得很隐蔽。** 设备内启动要装完整棵插件树（80+ 个包），
+    /// 冷启动、内存紧张、刚装完包时都会更慢。超时之后外壳报"dsh 没能启动"，
+    /// 而 host 日志里 dsh 明明起来了、自检还全绿——排查时最误导的一种组合。
+    ///
+    /// 这里的取舍：Node 跑在**同一个进程**里，"它最终会起来"是常态而不是赌注，
+    /// 所以宁可多等。真起不来时用户看到的仍然是诊断页，只是晚一点。
+    private static let startupTimeout: TimeInterval = 180
+
+    /// 超过这个时长仍在等时，把文案换成"还在启动"，让用户知道没卡死。
+    private static let slowStartupHint: TimeInterval = 40
     private var pollDeadline: Date?
+    /// 本轮探测开始的时刻，用来判断该不该换成"首次启动较慢"的文案。
+    private var pollStartedAt: Date?
     /// 最后一次轮询的失败原因。失败时显示出来——不然"连不上"是个黑箱。
     private var lastPollError: String?
 
@@ -70,6 +83,7 @@ final class HarnessViewController: UIViewController {
             queue: .main,
         ) { [weak self] _ in self?.handleWillEnterForeground() }
         pollDeadline = Date().addingTimeInterval(Self.startupTimeout)
+        pollStartedAt = Date()
         statusLabel.text = embedded ? "正在启动 dsh…" : "正在连接…"
         waitForHostThenLoad()
     }
@@ -234,6 +248,11 @@ final class HarnessViewController: UIViewController {
                 }
                 if let deadline = self.pollDeadline, Date() < deadline {
                     // 还在等——保持启动态，不要报错。
+                    // 等久了要说一声：静止不动的"正在启动"会被当成卡死。
+                    if let started = self.pollStartedAt,
+                       Date().timeIntervalSince(started) > Self.slowStartupHint {
+                        self.statusLabel.text = "正在启动 dsh…（首次启动较慢）"
+                    }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         self.waitForHostThenLoad()
                     }
@@ -250,6 +269,7 @@ final class HarnessViewController: UIViewController {
         spinner.startAnimating()
         statusLabel.text = "正在启动 dsh…"
         pollDeadline = Date().addingTimeInterval(Self.startupTimeout)
+        pollStartedAt = Date()
         waitForHostThenLoad()
     }
 

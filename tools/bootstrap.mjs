@@ -50,6 +50,22 @@ if (typeof WebAssembly === 'undefined') {
   })
 }
 
+// ── 第一步半：给每行日志加上"启动第几秒" ─────────────────────────────
+//
+// 没有时间戳时，"dsh 起来了但外壳说连不上"这种问题只能靠猜——分不清是它没起来
+// 还是起得太慢。实测就栽过一次：自检和插件树抢线程把启动拖过外壳 45 秒的超时线，
+// 日志里一切正常，症状却是"dsh 没能启动"。
+//
+// 前缀是秒数而不是墙上时间：要回答的问题是"到这一步花了多久"。
+{
+  const started = Date.now()
+  const write = console.log.bind(console)
+  console.log = (...args) => {
+    const elapsed = ((Date.now() - started) / 1000).toFixed(1).padStart(5)
+    write(`[${elapsed}s]`, ...args)
+  }
+}
+
 // ── 第二步：把 fetch 换成走 node:http 的实现 ──────────────────────────
 const { installFetchShim } = await import('./fetch-over-node-http.mjs')
 const swapped = installFetchShim()
@@ -73,6 +89,9 @@ console.log(
 )
 
 // ── 第二步半：原生桥自检 ─────────────────────────────────────────────
+//
+// 这里只**准备**自检，真正跑是在 dsh 起来之后（文件末尾）。
+let selfTestAfter
 //
 // 为什么要有这个：附件服务对**任何**图像错误都抛同一句
 // "Unsupported or malformed image data"，真实原因被塞进 cause 而不显示。
@@ -103,17 +122,15 @@ if (process.env.DSH_NATIVE_BRIDGE) {
     // 失败漏的根本不是方法，是元数据契约（少报 depth/space，
     // `undefined !== "uchar"` 恒成立，每张图都在最后一步被判负）。
     //
-    // **不 await**：这一趟要解四张 2100 像素宽的图，会给启动加上几秒。
-    // 它是诊断，不是启动的前置条件；让它和 dsh 的加载并行跑、跑完再记日志。
-    import('./bridge-selftest.mjs')
-      .then(async (selftest) => {
-        const ok = await selftest.runAttachmentSelfTest((line) => console.log(line))
-        console.log(`[bridge-selftest] 附件归一化自检${ok ? '全部通过' : '有失败项'}`)
-        // 传感器同样没有别的入口能替它把链走一遍，见 runSensorSelfTest。
-        const sensorOk = await selftest.runSensorSelfTest((line) => console.log(line))
-        console.log(`[sensor-selftest] 传感器自检${sensorOk ? '通过' : '有失败项'}`)
-      })
-      .catch((error) => console.log(`[bridge-selftest] 自检没跑起来: ${error?.stack ?? error}`))
+    // **不 await，而且要等 dsh 起完再跑。**
+    //
+    // 早先只是"不 await"，让它和插件树加载并行——错的。Node 是单线程，
+    // 解四张 2100 像素宽的图 + 十几趟原生桥往返，全都在和启动抢同一个线程。
+    // 外壳的启动超时是 45 秒，被拖过线之后它就宣告"dsh 没能启动"，
+    // 而日志里 dsh 明明起来了、自检还全绿——**最难查的那种失败**。
+    //
+    // 现在挂在 dshReady 之后：dsh 先服务，自检再跑。诊断不该有代价。
+    selfTestAfter = () => import('./bridge-selftest.mjs')
 
     // 大 body 专项：相机照片是几百 KB，而上面那张 PNG 只有几十字节。
     // 相机路由（空 body）是通的、metadata（小 body）也是通的，唯独真实照片失败
@@ -181,3 +198,18 @@ if (process.env.DSH_NATIVE_BRIDGE) {
 
 // ── 第三步：进 dsh ───────────────────────────────────────────────────
 await import('./node_modules/@deepseek-ai/dsh/lib/bin.js')
+
+// ── 第四步：dsh 起来之后再跑自检 ─────────────────────────────────────
+//
+// 顺序是有代价的教训：自检和启动并行会把启动拖过外壳 45 秒的超时线，
+// 表现成"dsh 没能启动"而日志里一切正常。见上面 selfTestAfter 那段。
+if (typeof selfTestAfter === 'function') {
+  selfTestAfter()
+    .then(async (selftest) => {
+      const ok = await selftest.runAttachmentSelfTest((line) => console.log(line))
+      console.log(`[bridge-selftest] 附件归一化自检${ok ? '全部通过' : '有失败项'}`)
+      const sensorOk = await selftest.runSensorSelfTest((line) => console.log(line))
+      console.log(`[sensor-selftest] 传感器自检${sensorOk ? '通过' : '有失败项'}`)
+    })
+    .catch((error) => console.log(`[bridge-selftest] 自检没跑起来: ${error?.stack ?? error}`))
+}

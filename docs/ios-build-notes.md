@@ -850,3 +850,61 @@ jpeg / png / jpeg-2000 等）。退回 JPEG 是不行的——上游比对
 `read_device_sensors` 不点名时读的是 device / battery / motion / barometer /
 activity：都不弹框、也不涉及位置。精确坐标要模型**显式**写进 `sensors`，
 那一步会弹系统授权框，由用户决定。
+
+### 失败 #17：拍照的第四道关，错在文件系统
+
+前三个根因（元数据契约、`Uint8Array` 输入、webp 退回 jpeg）修完之后，拍照仍然
+失败——但报的已经是完全不同的一件事：
+
+```
+EPERM: operation not permitted, open '/var/mobile/Containers/Data/Application'
+```
+
+注意那个路径**没有 UUID**，它已经爬到 app 容器**外面**了。
+
+dsh 在附件落盘前要证明目录项是持久的：
+
+```js
+ensureDurableHome(home) → ensureDurableDirectory(home, parse(home).root)
+```
+
+边界是 `parse(home).root`，也就是 **`/`**。于是它从 `DSH_HOME` 一路往上，对
+**每一级祖先目录**开只读句柄并 `fsync`。macOS/Linux 上这没问题；iOS 沙盒在
+容器上面一层就拒绝。
+
+修法：打包时给 `syncDirectory` 打补丁，EPERM/EACCES 时跳过，**其余错误照抛**
+（`tools/patch-ios-attachment-durability.mjs`）。这不是绕过——容器**里面**的
+目录是我们建的，该 fsync 也 fsync 得了；容器**外面**的是 iOS 建的、iOS 管的，
+为一件本就不属于我们的事让整次写入失败是错的。
+
+补丁锚点匹配不到恰好 1 处就**直接失败**，不静默跳过：静默跳过的话，下次收到的
+又只是一句"拍照失败"。
+
+#### 自检为什么没拦住——这条比 bug 本身重要
+
+上一版自检特意改成调 `prepareImageFile`，理由是"它是相机和上传的同一个入口"。
+但那个函数的文档原话是 **"without touching storage"**——我当初正是看中这一点
+（不往真正的附件库里塞测试图），而相机走的 `saveImage` 走的恰恰是**发布**
+那条路。结果：四条编码分支全绿，用户拍照照样失败。
+
+**挑"好测的那条路"，测出来的就是好测的那条路。**
+
+自检现在补上了落盘：用独立的根、跑完删掉，但父目录仍是 `DSH_HOME`，
+所以那段祖先 fsync 照样会走到。真机确认：
+
+```
+[bridge-selftest] 落盘 ok → sha256:419c8abf… 443338 字节
+[bridge-selftest] 附件归一化自检全部通过
+```
+
+#### 四次失败，没有一次的错误信息指向真因
+
+| 用户看到 | 真因 |
+|---|---|
+| Unsupported or malformed image data | 元数据契约缺 `depth`/`space` |
+| 同上 | `sharp()` 只认 Buffer，不认 `Uint8Array` |
+| 同上 | `webp()` 偷偷退回 JPEG，媒体类型对不上 |
+| 拍照失败 | 沙盒外目录 fsync 被拒 |
+
+前三个是读 dsh 源码读出来的；第四个是靠 `cause` 链打进 host 日志才当场看见——
+那行日志是修前三个时顺手加的，这次立刻回本。

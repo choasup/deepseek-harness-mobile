@@ -136,8 +136,8 @@ targets:
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         # 真机要签名。这里是 Xcode 里登录的那个账号的 team，**不是**钥匙串里
-        # 证书的 team——这台机器上两者不同：钥匙串有一张机构证书
-        # (3L724S787J)，但 Xcode 登录的是付费个人账号 (4752F9442A)。
+        # 证书的 team——同一台机器上很可能同时存在两者（比如一张单位发的
+        # 机构证书，和你自己登录的个人开发者账号），而它们的 team 不同。
         # 填错的报错是 `No Account for Team "…"`，看着像"没登录"，
         # 实际是"登录的账号没有这个 team"。
         # 查法：plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep teamID

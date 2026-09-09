@@ -182,8 +182,8 @@ cd ~/.dsh/profiles/mobile-web && pnpm install
 dsh --profile mobile-web --port 7799 --no-open
 ```
 
-**这一版的 runtime 还在 Mac 上，不在设备里。** 模拟器与宿主共享网络栈，所以
-`127.0.0.1` 直达；真机上那是手机自己，见下一节。
+上面这一段是**在 Mac 上跑 host** 的用法，用于开发时快速迭代前端。
+真机上不需要它——runtime 在设备内，见下一节。
 
 ### 装到真机上
 
@@ -195,8 +195,8 @@ cd ios && ./deploy-device.sh
 自动签名要靠这个账号去创建 App ID 和描述文件；钥匙串里有开发证书是不够的。
 
 **`project.yml` 里的 `DEVELOPMENT_TEAM` 要填「登录账号的 team」，不是「钥匙串里
-证书的 team」。** 这台机器上两者不同：钥匙串里是机构证书 `3L724S787J`，
-而 Xcode 登录的是免费个人 team `4752F9442A`。填错时报的还是
+证书的 team」。** 同一台机器上很可能同时存在两者——一张单位发的机构证书，
+和你自己登录的个人开发者账号——而它们的 team 不同。填错时报的还是
 `No Account for Team "…"`——看着像没登录，实际是登录的账号没有那个 team，
 很容易在这里反复排查登录状态。查法：
 
@@ -208,35 +208,31 @@ plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep -A2 teamID
 
 - 手机要**解锁**，否则 `devicectl … process launch` 报 `BSErrorCodeDescription = Locked`。
 - 第一次运行要信任证书：设置 → 通用 → VPN与设备管理 → 开发者App → 信任。
-- **免费个人 team 签出来的 app 7 天后过期**，到期重跑一次 `./deploy-device.sh`。
+- 免费个人 team 签出来的 app **7 天后过期**，到期重跑一次 `./deploy-device.sh`；
+  付费账号没有这个限制。
 
-**然后要解决地址问题。** 真机上默认的 `127.0.0.1` 指的是手机自己，必然连不上，
-app 会自动弹出连接设置让你填 Mac 的局域网地址。Mac 那边要把 host 起在局域网上
-（`ipconfig getifaddr en0` 拿到 IP）：
+**不需要在 Mac 上起 host，也不需要填任何地址。** app 自己在设备内起一个
+jitless 的 Node、加载 dsh 的完整插件树、再连自己的 `127.0.0.1:47799`。
+实测冷启动到端口可用约 1.7 秒（日志每行都带"启动第几秒"的前缀）。
+
+日志在设备的 Documents 里，这样取：
 
 ```bash
-dsh --profile mobile-web --host 192.168.1.9 --port 7799 --no-open --trusted-host 192.168.1.9:7799
+xcrun devicectl device copy from --device <UDID> \
+  --domain-type appDataContainer --domain-identifier com.dshmobile.shell \
+  --source Documents/dsh-host.log --destination ./dsh-host.log
 ```
 
-`--trusted-host` 是必须的：`/api` 有一道浏览器信任围栏，只认它认可的 authority，
-手机过来的 Host 头是 `<Mac IP>:7799`，不加就被挡。
-
-> **这会把 dsh 的接口暴露给同一个局域网，而 dsh 能执行代码。** dsh 拒绝绑
-> `0.0.0.0`（原话："it would expose remote code execution to the network"），
-> 绑一个具体的局域网 IP 是它允许的口子，但暴露面是一样的——用完就停掉，
-> 别在公共 Wi-Fi 或不受控的办公网上开着。真正干净的解法是设备内 runtime。
-
-连上之后想改地址：**摇一摇**，或者点开一条 `dshmobile://settings` 链接
-（`?url=` 可以直接把地址填好）。
-
-最终形态是设备内跑一个 jitless 的 Node、host 监听 app 自己的 loopback 端口——
-计划在 [`docs/superpowers/plans/2026-09-04-node-ios-build.md`](docs/superpowers/plans/2026-09-04-node-ios-build.md)。
-外壳这一层对此是**可替换**的：无论 host 在 Mac 上还是在 app 内的 Node 线程里，
-WebView 面对的都是同一个 loopback HTTP + WebSocket 端点，加载同一份前端。
-换过去时改的是 `HarnessEndpoint.current`，不是别的。
+启动时会跑两套自检，日志里能直接看到结果：附件归一化（四张合成图分别命中
+JPEG / PNG / 只有 WebP 三条编码分支，外加落盘发布）和传感器（清单 +
+device/battery/motion）。**它们跑在 dsh 起来之后**——早先让它们和插件树并行，
+把启动拖慢过，而症状是"dsh 没能启动"，日志里却一切正常。
 
 起来之后如果没配过模型凭据，会先弹"添加一个 API Key 开始使用"，输入框显示
 "当前模型不可用，请先选择模型"——那是缺凭据，不是这一层的问题。
+
+> **摇一摇**可以打开一个开发用的地址覆盖（也可以点 `dshmobile://settings`
+> 链接）。正常路径上用不到它——那是把 host 跑在 Mac 上调试时的入口。
 
 ### 界面是移动布局，不是缩小的桌面版
 

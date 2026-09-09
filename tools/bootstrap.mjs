@@ -283,6 +283,32 @@ if (process.env.DSH_NATIVE_BRIDGE) {
   server.close()
 }
 
+// ── 第二步又四分之三：让 ssh2 能在 jitless 下握手 ────────────────────
+//
+// ssh2 在模块加载时就跑一个 IIFE 去 `await require('./crypto/poly1305.js')()`
+// ——一个内联的 WASM 模块——而 `client.js` **无条件等待**它、且没有 .catch()。
+// jitless 没有 WebAssembly，我们的桩又让 compile 永不 settle，于是那个 promise
+// 永远悬着、`proto.start()` 从不执行，**任何 SSH 连接都无法开始**。
+//
+// 症状极具误导性：TCP 其实连上了，报的却是 "Timed out while waiting for
+// handshake"——看起来像网络不通，实际是协议根本没启动。
+//
+// `installJitlessPoly1305` 用 tweetnacl 的纯 JS Poly1305 顶掉那个 WASM 模块。
+// 它早就写好并在 `node --jitless` 下验证过（"握手与远程执行都成功"），
+// 但**从来没有被接进启动流程**——写完没接线，等于没写。
+//
+// **必须在第一次 require('ssh2') 之前**，也就是在加载 dsh 的插件树之前。
+try {
+  const { installJitlessPoly1305 } = await import(
+    './node_modules/@dsh-mobile/shell-ssh/lib/jitless-poly1305.js'
+  )
+  const done = installJitlessPoly1305()
+  console.log(`[jitless-poly1305] ${done ? '已装上（ssh2 的 WASM Poly1305 换成纯 JS）' : '此前已装过'}`)
+} catch (error) {
+  // 装不上不该拦住整个 harness——只意味着 SSH 用不了，其余能力照常。
+  console.log(`[jitless-poly1305] 装不上（SSH 将无法握手）: ${error?.message ?? error}`)
+}
+
 // ── 第三步：进 dsh ───────────────────────────────────────────────────
 await import('./node_modules/@deepseek-ai/dsh/lib/bin.js')
 

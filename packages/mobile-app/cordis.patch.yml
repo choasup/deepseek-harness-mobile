@@ -276,6 +276,16 @@
     - id: ui-layout-mobile
       name: '@dsh-mobile/client-ui-layout-mobile'
 
+    # 输入条上的 ⊕：手机独占能力的入口（重设计要解决的第 5 条）。
+    # 相机与传感器的**工具早就有了**，缺的只是界面上想得到它们的地方。
+    #
+    # 走的是 `conversation.input.left`（kind: list，纯附加，dsh 的坑位手册
+    # 原话 "Entries sit beside that chrome, never replace it"），不是接管
+    # `conversation.session.header`——后者标着 replaceRisk: shadows-shipped-ui，
+    # 占了要自己重画标题与"对话/轨迹"视图 Tab。
+    - id: ui-capabilities
+      name: '@dsh-mobile/client-ui-capabilities'
+
     # take_photo：让模型请求用设备相机拍一张照片。
     #
     # 这是「手机是大脑和感官」里**感官**那一半——摄像头是这个形态相对桌面

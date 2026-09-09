@@ -75,6 +75,19 @@ const CSS = `
   padding: 2px 8px 6px;
 }
 
+/* **自己写的 display 会覆盖浏览器默认的 [hidden] display:none。**
+   下面几个类都设了 display，所以必须显式把 hidden 态压回去——否则
+   hidden 属性形同虚设：会话页、两个 Tab 页、Tab 栏会同时渲染，
+   而且不报任何错，只是"东西都在页面上"。实测踩过。
+
+   （这段注释里刻意不用反引号：整个 CSS 是一个 TS 模板字符串，
+   反引号会把它提前终结，而报错指向的是下一行的语法，很难看出真因。） */
+.dshm-center[hidden],
+.dshm-tabpage[hidden],
+.dshm-tabbar[hidden] {
+  display: none !important;
+}
+
 .dshm-center,
 .dshm-tabpage {
   flex: 1 1 auto;

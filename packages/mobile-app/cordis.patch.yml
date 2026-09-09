@@ -226,14 +226,22 @@
     # `ctx.shell`）预计是 `shell-ssh` 包内部一处不大的改动——不需要改
     # `remote-registry`（`domain/changed` 已经带够信息可以过滤），但需要
     # 一次独立的实现 + 测试，这里不顺手做。
+    # 把远程机器注册进 ctx.remotes。**必须排在 shell-ssh 之前**——
+    # 后者按 name 去查已注册的机器，查不到就安静地不提供 ctx.shell。
+    #
+    # 机器清单在 $DSH_HOME/remote-machines.json（明文，可入库）；私钥走
+    # $DSH_HOME/remote-keys/<name>.key 一次性投递，导入凭据库后立即删除。
+    # 见 packages/remote-bootstrap/src/plugin.ts。
+    - id: remote-bootstrap
+      name: '@dsh-mobile/remote-bootstrap'
+
     - id: shell-ssh
       name: '@dsh-mobile/shell-ssh/plugin'
       config:
-        # 全新安装时几乎肯定查不到这个名字——这是预期状态，不是配置错误：
-        # 见上面大段注释，查不到时这一行只是安静地不提供 ctx.shell。用户
-        # 注册好机器后，在自己的 profile 级 cordis.patch.yml 里把这里的值
-        # 换成那台机器的真实 name（再重启 dsh，见上面的"已知的功能缺口"）。
-        machine: default
+        # 这个名字要与 $DSH_HOME/remote-machines.json 里的一条对上，
+        # 由上面的 remote-bootstrap 负责注册。查不到时这一行只是安静地
+        # 不提供 ctx.shell（不是配置错误），代价是 tool-bash 用不了。
+        machine: gpu-h20
 
     # 纯 JS 的 glob / grep，顶替上面禁掉的 tool-fs-search。
     # 它注入 fs 而不是 subprocess——iOS 上起不了进程，但读文件可以。

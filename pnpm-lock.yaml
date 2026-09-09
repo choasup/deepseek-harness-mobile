@@ -52,6 +52,15 @@ importers:
         specifier: ^4.2.0
         version: 4.3.2
 
+  packages/remote-bootstrap:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
+      '@dsh-mobile/remote-registry':
+        specifier: workspace:*
+        version: link:../remote-registry
+
   packages/remote-registry:
     dependencies:
       zod:

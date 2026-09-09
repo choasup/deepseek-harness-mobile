@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-mobile/remote-bootstrap",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/plugin.js",
+  "types": "lib/plugin.d.ts",
+  "exports": {
+    ".": { "types": "./lib/plugin.d.ts", "default": "./lib/plugin.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "scripts": { "build": "tsdown", "prepare": "tsdown" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-mobile/remote-registry": "workspace:*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-mobile/remote-registry": "workspace:*"
+  }
+}

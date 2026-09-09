@@ -206,6 +206,17 @@ enum NodeHost {
             setenv("DSH_NATIVE_BRIDGE", "http://127.0.0.1:\(port)", 1)
         }
 
+        // 远程机器清单：从 bundle 铺到 DSH_HOME，供 remote-bootstrap 读。
+        // 每次启动覆盖——仓库里那份是唯一事实来源。**只含明文**
+        // （host/port/user），私钥走 remote-keys/<name>.key 一次性投递，
+        // 由插件导入凭据库后立即删除，见 remote-bootstrap 的文档注释。
+        let bundled = root.appendingPathComponent("remote-machines.json")
+        if fm.fileExists(atPath: bundled.path) {
+            let target = dshHome.appendingPathComponent("remote-machines.json")
+            try? fm.removeItem(at: target)
+            try? fm.copyItem(at: bundled, to: target)
+        }
+
         setenv("DSH_HOME", dshHome.path, 1)
         // dsh 的工作区默认取 cwd；bundle 只读，指到可写目录去。
         setenv("DSH_CWD", dshHome.path, 1)

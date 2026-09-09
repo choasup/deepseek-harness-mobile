@@ -77,6 +77,7 @@ npm install --omit=dev --no-audit --no-fund \
   "$REPO/packages/tool-fs-search" \
   "$REPO/packages/tool-camera" \
   "$REPO/packages/tool-sensors" \
+  "$REPO/packages/remote-bootstrap" \
   "$REPO/packages/client-ui-layout-mobile"
 
 # npm 对本地 file: 依赖建的是**符号链接**，指向仓库里的源码目录——即逃出了
@@ -95,9 +96,12 @@ cp "$REPO/tools/fetch-over-node-http.mjs" .
 # 启动自检：跑一遍附件服务的真实归一化链路，见 tools/bridge-selftest.mjs。
 cp "$REPO/tools/bridge-selftest.mjs" .
 cp "$REPO/ios/nodejs-project-bootstrap.mjs" ./bootstrap.mjs 2>/dev/null || true
+# 远程机器清单（明文，不含任何密钥）。NodeHost 每次启动把它铺到 DSH_HOME，
+# remote-bootstrap 读它注册机器。私钥不走这条路——见该插件的文档注释。
+cp "$REPO/packages/mobile-app/remote-machines.json" . 2>/dev/null || true
 
 echo "== 把逃出 bundle 的符号链接换成实体拷贝 =="
-for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera tool-sensors client-ui-layout-mobile; do
+for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera tool-sensors remote-bootstrap client-ui-layout-mobile; do
   L="node_modules/@dsh-mobile/$p"
   [ -L "$L" ] || continue
   rm "$L" && mkdir -p "$L"

@@ -1,0 +1,10 @@
+[
+  {
+    "name": "gpu-h20",
+    "host": "42.192.34.154",
+    "port": 11020,
+    "user": "root",
+    "tags": ["gpu", "h20"],
+    "defaultWorkdir": "/root/video-inspection"
+  }
+]

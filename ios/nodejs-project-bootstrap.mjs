@@ -66,6 +66,88 @@ if (typeof WebAssembly === 'undefined') {
   }
 }
 
+// ── 第一步又三分之二：把路径事实写进日志 ─────────────────────────────
+//
+// 新会话失败时报的是：
+//   failed to ensure project directory ".../<容器UUID>/Documents":
+//   EPERM: mkdir '/private/var/mobile/Containers/Data/Application/<容器UUID>'
+//
+// 也就是它在**创建容器根目录本身**——沙盒外，必然失败。但光看那条错误分不清
+// 是"容器 UUID 变了、记录指向死路径"还是"dsh 用的是 process.cwd() 而不是
+// DSH_CWD"。两者修法完全不同，所以先把事实记下来，别猜。
+{
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const home = process.env.DSH_HOME ?? '(未设置)'
+  const cwdEnv = process.env.DSH_CWD ?? '(未设置)'
+  const real = process.cwd()
+  console.log(`[paths] process.cwd()=${real}`)
+  console.log(`[paths] DSH_CWD=${cwdEnv}`)
+  console.log(`[paths] DSH_HOME=${home}`)
+  // 容器根是 DSH_HOME 往上三层（<容器>/Library/Application Support/dsh）。
+  const container = path.resolve(home, '..', '..', '..')
+  for (const [label, target] of [
+    ['容器根', container],
+    ['容器/Documents', path.join(container, 'Documents')],
+    ['cwd 本身', real],
+  ]) {
+    let state
+    try {
+      fs.accessSync(target, fs.constants.W_OK)
+      state = '存在且可写'
+    } catch (error) {
+      state = `不可用（${error?.code ?? error?.message}）`
+    }
+    console.log(`[paths] ${label} ${target} → ${state}`)
+  }
+}
+
+// ── 第一步又四分之三：修好指向旧容器的工作区路径 ─────────────────────
+//
+// **iOS 上绝对路径不跨安装稳定。** app 的数据容器带一个 UUID
+// （/var/mobile/Containers/Data/Application/<UUID>/），重装后可能换掉；
+// 而 dsh 的工作区记录里存的是绝对路径——桌面上这是合理假设，这里不成立。
+//
+// 后果不是"少个工作区"：建会话会去 mkdir 那条死路径，一路往上走到容器根，
+// 撞上沙盒的 EPERM。用户看到的是"新会话点了没反应"，而失败只写在 WebView
+// 的 console.warn 里。实测这个状态持续了一天多、51 条消息全挤在一条会话里。
+//
+// 修法是**只动确实失效的记录**：路径还在就不碰；不在了，就把同样的尾巴
+// 接到当前容器上，确认新路径存在才写回。修不了就原样留着并记一行日志——
+// 猜一个路径写进去比留着坏记录更糟。
+{
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const home = process.env.DSH_HOME
+  const file = home === undefined ? undefined : path.join(home, 'storages', 'workspace.json')
+  if (file !== undefined && fs.existsSync(file)) {
+    try {
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8'))
+      const table = doc?.tables?.workspaces ?? {}
+      const container = path.resolve(home, '..', '..', '..')
+      let changed = 0
+      for (const [id, workspace] of Object.entries(table)) {
+        const stored = workspace?.path
+        if (typeof stored !== 'string' || fs.existsSync(stored)) continue
+        // 从存下来的路径里取出容器之后的那一段，接到当前容器上。
+        const tail = stored.match(/\/Containers\/Data\/Application\/[^/]+\/(.*)$/u)?.[1]
+        const candidate = tail === undefined ? undefined : path.join(container, tail)
+        if (candidate === undefined || !fs.existsSync(candidate)) {
+          console.log(`[workspace-repair] ${id} 的路径失效且无法对应：${stored}`)
+          continue
+        }
+        workspace.path = candidate
+        workspace.updatedAt = new Date().toISOString()
+        changed += 1
+        console.log(`[workspace-repair] ${id}: ${stored} → ${candidate}`)
+      }
+      if (changed > 0) fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`)
+    } catch (error) {
+      console.log(`[workspace-repair] 跳过（读不动或格式不对）：${error?.message ?? error}`)
+    }
+  }
+}
+
 // ── 第二步：把 fetch 换成走 node:http 的实现 ──────────────────────────
 const { installFetchShim } = await import('./fetch-over-node-http.mjs')
 const swapped = installFetchShim()

@@ -1,5 +1,6 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { MobileAppFrame } from './AppFrame.tsx'
+import { MobileSidebar } from './MobileSidebar.tsx'
 import { MobileLayoutController } from './service.ts'
 import { createMobileLayoutStore } from './store.ts'
 import { installStyles } from './styles.ts'
@@ -9,7 +10,7 @@ export { MobileLayoutController }
 export type { ILayout } from './types.ts'
 
 /** cordis fiber inject——与 dsh 自己的 layout 插件一致。 */
-export const inject = ['slots', 'theme', 'sessions']
+export const inject = ['slots', 'theme', 'sessions', 'workspaces']
 
 /**
  * 浏览器半边。形状照抄 `dsh-client-ui-layout`：provide `ctx.layout`，
@@ -51,6 +52,34 @@ export function apply(ctx: ClientContext): void {
       disposeService()
     }
   }, 'ui-layout-mobile: service + root registration')
+
+  // 顶替自带的桌面竖栏。**五个子坑位的名字必须一字不差**——其余插件
+  // （ui-workspace、ui-settings…）注册的目标是坑位名，不是某个包；
+  // 少声明一个，注册进来的东西就没地方落，整棵树起不来。
+  ctx.effect(
+    () =>
+      ctx.slots.inject('sidebar', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar',
+            children: {
+              'sidebar.brand.mark': { kind: 'single', scope: 'root' },
+              'sidebar.brand.name': { kind: 'single', scope: 'root' },
+              'sidebar.workspaces': { kind: 'single', scope: 'root' },
+              'sidebar.settings': { kind: 'single', scope: 'root' },
+              'sidebar.footer.action': { kind: 'list', scope: 'root' },
+            },
+            inject: () => ({
+              startSession: (workspaceId?: string) => {
+                ctx.workspaces.startSession(workspaceId as never)
+              },
+            }),
+          },
+          MobileSidebar,
+        ),
+      ),
+    'ui-layout-mobile: 手机版侧栏外壳',
+  )
 
   // 主题投影。换掉 layout 就得连这个一起接管，否则设计令牌变量没人写，
   // 整个界面（不只是这个包）全部掉成无样式——见 theme-presenter.ts 的说明。

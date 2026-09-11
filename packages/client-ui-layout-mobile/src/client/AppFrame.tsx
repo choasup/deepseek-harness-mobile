@@ -166,7 +166,9 @@ export function MobileAppFrame({ useStore, useSessions, actions, renderSlot }: F
       </div>
 
       <div className={cls.tabPage} hidden={inConversation || tab !== 'sessions'}>
-        {renderSlot('sidebar', { collapsed: false, width: 320 })}
+        {/* 宽度不再由外框指定：手机版侧栏外壳自己通栏铺满（见 MobileSidebar）。
+            自带外壳把这个值内联写进 style，在 375 宽的屏上留出 55px 死区。 */}
+        {renderSlot('sidebar', { collapsed: false, width: 0 })}
       </div>
 
       <div className={cls.tabPage} hidden={inConversation || tab !== 'env'}>

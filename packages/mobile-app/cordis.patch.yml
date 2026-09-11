@@ -439,6 +439,21 @@
 - id: ui-layout
   disabled: true
 
+# `dsh-client-ui-sidebar` 是**桌面竖栏**：宽度由 `width` 内联写死（375 宽的
+# 屏上渲染成 320px，右边空出 55px 死区），顶上一整行品牌标识加一个"折叠侧栏"
+# 按钮，底部钉着设置。塞进手机的 Tab 页里，就是一眼能看出的"桌面组件硬塞进
+# 手机"——这轮重设计要解决的五个问题之一。
+#
+# 只把 `width` 传对只能去掉那条死区；品牌行、折叠键、桌面密度都还在。而那些
+# 元素的类名是 CSS Modules 的哈希（`hHd-Xa_logoRow` 之类），**升一次 dsh 就
+# 会变**，靠选择器去藏它们是埋定时炸弹。所以整层外壳换掉。
+#
+# 换掉的**只有承载几何的那一层**：`@dsh-mobile/client-ui-layout-mobile` 里的
+# MobileSidebar 声明同样的五个子坑位（名字一字不差），会话树（ui-workspace）、
+# 设置面板（ui-settings）、页脚动作照旧落位。
+- id: ui-sidebar
+  disabled: true
+
 
 # ── H. 把 dsh-web-app 关掉的工具重新打开 ──────────────────────────────
 #

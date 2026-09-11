@@ -113,12 +113,30 @@ export function CapabilitiesEntry({ inputActions }: Props) {
         aria-haspopup="menu"
         onClick={() => setOpen((value) => !value)}
       >
+        {/*
+          **不能用加号。** dsh 自带的"命令"按钮就在左边一格，画的也是一个加号；
+          两个几乎一样的 + 并排，用户分不出哪个是哪个（在 375 宽的屏上实测确认）。
+          设计稿写的是 ⊕，但设计稿里没有那个自带按钮。
+          换成"手机 + 感应波"：这一格下面挂的是相机和传感器，都是"设备去感知
+          外面的世界"，图形上跟加号没有任何相似处。
+        */}
         <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path
-            d="M12 5.5v13M5.5 12h13"
+          <rect
+            x="4.5"
+            y="3"
+            width="10"
+            height="18"
+            rx="2.2"
             stroke="currentColor"
-            strokeWidth="1.8"
+            strokeWidth="1.7"
+            fill="none"
+          />
+          <path
+            d="M17.6 9.2a4.2 4.2 0 010 5.6M20.2 6.6a7.8 7.8 0 010 10.8"
+            stroke="currentColor"
+            strokeWidth="1.7"
             strokeLinecap="round"
+            fill="none"
           />
         </svg>
       </button>

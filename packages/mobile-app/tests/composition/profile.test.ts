@@ -88,6 +88,10 @@ const MUST_DISABLE = [
   'agent-presets',
   // 同样只在 dsh-web-app 组合里存在：桌面三栏外框，换成移动版单栏外框。
   'ui-layout',
+  // 也是 dsh-web-app 才有：桌面竖栏（宽度内联写死、品牌行、折叠键）。
+  // 换成 client-ui-layout-mobile 里的 MobileSidebar——它声明同样的五个
+  // 子坑位，所以会话树与设置面板照旧落位。
+  'ui-sidebar',
   // 开发期热重载。设备上 dsh 跑在只读 bundle 里，文件不会变，用不上；
   // 而它要的 Node 内部访问依赖一个已被剥掉的原生模块。
   'hmr',

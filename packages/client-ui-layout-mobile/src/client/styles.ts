@@ -22,6 +22,10 @@ export const cls = {
   sheetGrip: 'dshm-sheet-grip',
   sheetBody: 'dshm-sheet-body',
   overlay: 'dshm-overlay',
+  sidebar: 'dshm-sidebar',
+  newSession: 'dshm-new-session',
+  sidebarBody: 'dshm-sidebar-body',
+  sidebarFoot: 'dshm-sidebar-foot',
 } as const
 
 const CSS = `
@@ -300,6 +304,120 @@ const CSS = `
   [role='dialog'] [class*='row'] {
     min-width: 0 !important;
   }
+}
+
+/* ── 手机版侧栏外壳（顶替 dsh 自带的桌面竖栏）──────────────────────── */
+
+/* 通栏，不再有内联写死的 320px。自带外壳在 375 宽的屏上留出 55px 死区，
+   那是"桌面组件硬塞进手机"最直观的一处。 */
+.dshm-sidebar {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.dshm-new-session {
+  flex: 0 0 auto;
+  margin: 4px 16px 10px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.dshm-new-session:active {
+  background: var(--dsw-alias-bg-l1);
+}
+
+.dshm-sidebar-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 设置钉在底部，贴着 Tab 栏上沿。 */
+.dshm-sidebar-foot {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  padding: 4px 8px;
+}
+
+/* 会话树本体是照搬的桌面组件，密度按鼠标做的。这里只补触控下限——
+   按名字选不到（它的类名是 CSS Modules 哈希，升级 dsh 就会变），
+   所以按**角色**选：能点的东西一律 ≥44 高。 */
+.dshm-sidebar-body button,
+.dshm-sidebar-body [role='button'],
+.dshm-sidebar-body [role='treeitem'],
+.dshm-sidebar-body a {
+  min-height: 44px;
+}
+
+/* 图标按钮（搜索、视图选项、添加工作区、每行的 ···）的触控目标靠**伪元素**
+   撑开，不改它自己的尺寸。
+   直接写 min-width 试过一次，结果是"添加工作区"被挤出屏幕右侧：那三个图标
+   装在一个宽度固定 60px 的容器里，按钮一变宽就溢出，而溢出的部分在手机上
+   根本点不到——为了做大触控目标反而丢了一个功能。 */
+.dshm-sidebar-body button:has(> svg:only-child) {
+  position: relative;
+}
+
+.dshm-sidebar-body button:has(> svg:only-child)::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+/* 这一层不该横向滚。里面的桌面组件按更宽的视口算过尺寸，
+   多出来的几个像素在手机上表现为整页能左右拽。 */
+.dshm-sidebar-body > * {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* ── 会话页里溢出的行 ──────────────────────────────────────────────── */
+
+/* 自带的聊天节点按桌面宽度排版，窄屏上整行被切掉右半截。实测："上下文注入 ·
+   @deepseek-ai/dsh-system-prompt" 这一行需要 336px，而可用宽度只有 303px，
+   后面的包名直接消失——不是省略号，是没了。
+   **只让"来源"那一格收缩。** 两种更省事的写法都试过，都更糟：
+   - 让行内每一格都能收缩 → "上下文注入"四个字被压成两行并互相叠字，
+     标题本来就该按内容宽度占位。
+   - 让整行换行 → 行高是固定的 24px，换到第二行的内容直接被裁掉不见，
+     比省略号糟得多（用户根本不知道还有东西）。
+   选择器按**子串**匹配类名（_row_9cl6j_10 这种是 CSS Modules 的
+   「原名_哈希」形状，原名留在前面），比匹配整串哈希稳。
+   注意这段在 JS 模板字符串里，不能用反引号。 */
+.dshm-center [class*='row'] > [class*='source'] {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 会话页里这一栏只剩一个返回键，右边整片是空的。压薄它：那 20 来个像素
+   在 812 高的屏上不算多，但它紧挨着自带会话头（标题 + 对话/轨迹 Tab），
+   两条横线叠在一起会让顶部显得很重。去掉分隔线，让它和下面那一行连成一片。 */
+.dshm-frame[data-conversation='open'] .dshm-topbar {
+  padding-top: calc(env(safe-area-inset-top, 8px) + 6px);
+  padding-bottom: 2px;
+  border-bottom: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -84,6 +84,7 @@ PATCH
 # 于是"能用"只是因为那之后没人重跑过这个脚本。
 npm install --omit=dev --no-audit --no-fund \
   "$REPO/packages/mobile-app" \
+  "$REPO/packages/client-ui-env" \
   "$REPO/packages/remote-registry" \
   "$REPO/packages/shell-ssh" \
   "$REPO/packages/tool-fs-search" \
@@ -114,7 +115,7 @@ cp "$REPO/ios/nodejs-project-bootstrap.mjs" ./bootstrap.mjs 2>/dev/null || true
 cp "$REPO/packages/mobile-app/remote-machines.json" . 2>/dev/null || true
 
 echo "== 把逃出 bundle 的符号链接换成实体拷贝 =="
-for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera tool-sensors remote-bootstrap client-ui-capabilities client-ui-layout-mobile; do
+for p in mobile-app remote-registry shell-ssh tool-fs-search tool-camera tool-sensors remote-bootstrap client-ui-capabilities client-ui-layout-mobile client-ui-env; do
   L="node_modules/@dsh-mobile/$p"
   [ -L "$L" ] || continue
   rm "$L" && mkdir -p "$L"

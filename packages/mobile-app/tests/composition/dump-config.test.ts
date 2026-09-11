@@ -196,6 +196,7 @@ const OUR_ADDITIONS: Array<{ id: string; name: string }> = [
   { id: 'remote-registry', name: '@dsh-mobile/remote-registry/plugin' },
   { id: 'shell-ssh', name: '@dsh-mobile/shell-ssh/plugin' },
   { id: 'ui-layout-mobile', name: '@dsh-mobile/client-ui-layout-mobile' },
+  { id: 'ui-env', name: '@dsh-mobile/client-ui-env' },
   { id: 'tool-fs-search-js', name: '@dsh-mobile/tool-fs-search/plugin' },
 ]
 

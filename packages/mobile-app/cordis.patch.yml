@@ -276,6 +276,17 @@
     - id: ui-layout-mobile
       name: '@dsh-mobile/client-ui-layout-mobile'
 
+    # 「环境」Tab 的内容：这台 harness 现在挂着什么。
+    #
+    # 在此之前那一页是**一片纯白**。而"这个 app 能干什么"恰恰是反复出问题的
+    # 地方——工具被整段禁掉过、tool-bash 开不开取决于有没有机器、插件装载
+    # 失败时界面上没有任何提示。这些事实此前只在启动日志里，而手机上看日志
+    # 要接电脑。
+    #
+    # 数据来自宿主自带的 pluginInventory/list，不需要我们新增任何 RPC。
+    - id: ui-env
+      name: '@dsh-mobile/client-ui-env'
+
     # 输入条上的 ⊕：手机独占能力的入口（重设计要解决的第 5 条）。
     # 相机与传感器的**工具早就有了**，缺的只是界面上想得到它们的地方。
     #

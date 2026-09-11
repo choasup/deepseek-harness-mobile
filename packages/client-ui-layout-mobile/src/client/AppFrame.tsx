@@ -30,7 +30,11 @@ interface FrameProps {
     selector: (state: { current?: string; byId: Record<string, { blank: boolean }> }) => T,
   ) => T
   actions: PanelActions
-  renderSlot: (name: string, owner: Record<string, unknown>) => React.ReactNode
+  renderSlot: (
+    name: string,
+    owner: Record<string, unknown>,
+    opts?: { fallback?: React.ReactNode },
+  ) => React.ReactNode
 }
 
 /** 会话 Tab 图标。inline SVG——这个包不引任何图标库。 */
@@ -172,7 +176,22 @@ export function MobileAppFrame({ useStore, useSessions, actions, renderSlot }: F
       </div>
 
       <div className={cls.tabPage} hidden={inConversation || tab !== 'env'}>
-        {renderSlot('env', {})}
+        {/*
+          还没有插件占这个坑位，而**一片纯白会被当成坏了**。给一句说明比留白
+          诚实：用户知道这里以后有东西，也知道现在没有，不会去反复点。
+          等机器列表那一版落地，这段 fallback 自然被顶掉。
+        */}
+        {renderSlot('env', {}, {
+          fallback: (
+            <div className={cls.emptyTab}>
+              <p className={cls.emptyTitle}>还没有可显示的环境</p>
+              <p className={cls.emptyHint}>
+                执行远程命令的机器、连接状态和执行位置会出现在这里。
+                现在它们只在启动日志里。
+              </p>
+            </div>
+          ),
+        })}
       </div>
 
       {/* 会话内页不显示 Tab 栏——底部要留给输入条。 */}

@@ -26,6 +26,9 @@ export const cls = {
   newSession: 'dshm-new-session',
   sidebarBody: 'dshm-sidebar-body',
   sidebarFoot: 'dshm-sidebar-foot',
+  emptyTab: 'dshm-empty',
+  emptyTitle: 'dshm-empty-title',
+  emptyHint: 'dshm-empty-hint',
 } as const
 
 const CSS = `
@@ -418,6 +421,32 @@ const CSS = `
   padding-top: calc(env(safe-area-inset-top, 8px) + 6px);
   padding-bottom: 2px;
   border-bottom: none;
+}
+
+/* Tab 页的空状态。 */
+.dshm-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 40px;
+  text-align: center;
+}
+
+.dshm-empty-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dshm-empty-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--dsw-alias-label-caption);
 }
 
 @media (prefers-reduced-motion: reduce) {

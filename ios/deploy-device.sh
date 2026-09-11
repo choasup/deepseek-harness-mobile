@@ -12,6 +12,7 @@
 #   plutil -p ~/Library/Preferences/com.apple.dt.Xcode.plist | grep teamID
 set -euo pipefail
 cd "$(dirname "$0")"
+REPO_ROOT="$(cd .. && pwd)"
 
 DEVICE_ID="${1:-}"
 if [[ -z "$DEVICE_ID" ]]; then
@@ -26,6 +27,31 @@ if [[ -z "$DEVICE_ID" ]]; then
   exit 1
 fi
 echo "目标设备: $DEVICE_ID"
+
+# ── Node 侧必须先重建，再铺进 nodejs-project ──────────────────────────
+#
+# **这一步以前不在脚本里，代价是今天又吃了一次。** nodejs-project/ 只是
+# project.yml 里的一个资源文件夹，Xcode 只负责把它整个拷进 app bundle；
+# 它自己不会重新生成。于是改完插件直接 deploy，装上去的是上一次留下的旧
+# JS——而日志、自检、界面全都正常，唯独改动不生效。今天为此把"SSH 挂起"
+# 排查了半天，最后发现设备上跑的根本不是新代码。
+#
+# 顺序不能颠倒：prepare 从各包的 lib/ 拷贝，而 lib/ 是 build 的产物。
+# 只 prepare 不 build，拷过去的还是旧产物。
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+NODE_MINOR=$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)
+if [[ "$NODE_MAJOR" -lt 22 || ( "$NODE_MAJOR" -eq 22 && "$NODE_MINOR" -lt 19 ) ]]; then
+  # tsdown 要 Promise.withResolvers（Node 22.11+）。版本不够时它报的是
+  # "Promise.withResolvers is not a function"，跟版本毫无字面关系。
+  echo "Node 版本不够（当前 $(node -v 2>/dev/null || echo 无)），需要 ^22.19 || >=24：" >&2
+  echo "  export PATH=\"\$HOME/.nvm/versions/node/v22.19.0/bin:\$PATH\"" >&2
+  exit 1
+fi
+
+echo "== 重建 Node 侧的包 =="
+(cd "$REPO_ROOT" && pnpm -r run build)
+echo "== 铺 nodejs-project =="
+./prepare-nodejs-project.sh
 
 xcodegen generate
 xcodebuild -project DshMobile.xcodeproj -scheme DshMobile \

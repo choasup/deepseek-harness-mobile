@@ -137,12 +137,59 @@ async function register(ctx: Context, home: string): Promise<void> {
     //
     // 整段再包一层 try/catch：诊断探针无论如何都不该有能力影响运行。
     try {
-      const shell = (ctx as unknown as { get(name: string): unknown }).get('shell')
-      console.log(
-        `[remote-bootstrap] ctx.shell ${shell === undefined ? '不存在——tool-bash 还不能开' : '已就绪，tool-bash 可以开了'}`,
-      )
+      const shell = (ctx as unknown as { get(name: string): unknown }).get('shell') as ShellLike | undefined
+      if (shell === undefined) {
+        console.log('[remote-bootstrap] ctx.shell 不存在——tool-bash 还不能开')
+        return
+      }
+      console.log('[remote-bootstrap] ctx.shell 已就绪，tool-bash 可以开了')
+      void smokeTest(shell)
     } catch (error) {
       console.log(`[remote-bootstrap] 查 ctx.shell 时出错（不影响运行）: ${error instanceof Error ? error.message : String(error)}`)
     }
   }, 3000)
+}
+
+/** `ctx.shell` 用得到的那一小块（`resolve` 补默认值，`run` 跑前台命令）。 */
+interface ShellLike {
+  resolve(request: { command: string, timeoutMs?: number }): unknown
+  run(spec: unknown): Promise<{
+    exitCode: number | null
+    timedOut: boolean
+    stdout: { text: string }
+    stderr: { text: string }
+  }>
+}
+
+/**
+ * 真的在远端跑一条命令，把结果写进日志。
+ *
+ * **为什么光有"ctx.shell 已就绪"不够**：那只说明 shell-ssh 这个插件挂上了
+ * executor，跟"SSH 握得上手、认证过得去、命令跑得动"是三件不同的事。
+ * 这个项目里已经为这个区别付过一次代价：poly1305 那个补丁写好、测过、
+ * 连"必须在 require('ssh2') 之前调用"都写进注释了，就是没人调用——而
+ * 日志里一切正常，症状只在用户按下发送键之后才出现（"连不上 gpu-h20"）。
+ * 启动时跑一条 `echo`，就把这段延迟归零：日志里直接能看到握手结果。
+ *
+ * 失败不做任何处理，只记录。远端连不上时手机上的其余能力照常——
+ * "手机是大脑"那一半本来就不依赖远端。
+ */
+async function smokeTest(shell: ShellLike): Promise<void> {
+  const started = Date.now()
+  try {
+    const result = await shell.run(shell.resolve({ command: 'echo ssh-ok; uname -sm', timeoutMs: 25_000 }))
+    const ms = Date.now() - started
+    if (result.exitCode === 0) {
+      console.log(`[remote-smoke] 远端可执行（${ms}ms）：${result.stdout.text.trim().replace(/\n/g, ' | ')}`)
+      return
+    }
+    // 退出码和 stderr 都要给。只说"失败"等于把排查推回给下一个人，
+    // 而 SSH 的失败原因（认证被拒 / 握手超时 / 主机不可达）差别很大。
+    console.log(
+      `[remote-smoke] 远端执行失败（${ms}ms）exit=${String(result.exitCode)}`
+      + `${result.timedOut ? ' 超时' : ''}: ${result.stderr.text.trim().slice(0, 400)}`,
+    )
+  } catch (error) {
+    console.log(`[remote-smoke] 远端执行抛错（${Date.now() - started}ms）: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }

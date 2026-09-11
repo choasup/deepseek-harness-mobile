@@ -64,10 +64,46 @@ final class HarnessViewController: UIViewController {
 
     override var canBecomeFirstResponder: Bool { true }
 
-    /// 摇一摇打开地址覆盖。**开发入口**，不在正常路径上。
+    /// 摇一摇打开开发入口。不在正常路径上。
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
         guard motion == .motionShake else { return }
-        openSettings(preset: nil)
+        guard presentedViewController == nil else { return }
+
+        let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        // 原生列表 vs 网页列表，在同一个 app 里来回切着比。
+        //
+        // 「导航归原生还是归 Web」这件事我论证不出来——它取决于手感。
+        // 与其我替谁拍板，不如让两套都能看到，用哪套顺手就留哪套。
+        // 放在摇一摇后面而不是做成正式入口，是因为它本来就是个临时的对照组：
+        // 一旦选定了一套，这个开关就该删掉。
+        let showingNative = nativeList?.view.isHidden == false
+        sheet.addAction(UIAlertAction(title: showingNative ? "切回网页列表" : "切到原生列表", style: .default) {
+            [weak self] _ in self?.toggleNativeList()
+        })
+        sheet.addAction(UIAlertAction(title: "连接地址…", style: .default) {
+            [weak self] _ in self?.openSettings(preset: nil)
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = view
+        sheet.popoverPresentationController?.sourceRect = CGRect(
+            x: view.bounds.midX, y: view.bounds.maxY, width: 0, height: 0,
+        )
+        present(sheet, animated: true)
+    }
+
+    /// 在原生列表和 WebView 之间来回切。**开发用的对照开关**。
+    private func toggleNativeList() {
+        guard let nativeList else { return }
+        // 还在启动态（WebView 本来就藏着、覆盖层还在）就别切：那时候原生列表
+        // 请求 host 必然失败，显示出来只会是一屏误导性的错误。
+        guard launchView.isHidden else {
+            print("[native-list] host 还没起来，先不切")
+            return
+        }
+        let showNative = nativeList.view.isHidden
+        if showNative { nativeList.rootView.reloadToken += 1 }
+        nativeList.view.isHidden = !showNative
+        webView.isHidden = showNative
     }
 
     override func viewDidLoad() {

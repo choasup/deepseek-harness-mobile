@@ -23,6 +23,13 @@ struct SessionListView: View {
     /// 选中一个会话时通知外壳（外壳负责把 WebView 切到那个会话）。
     var onOpen: (DshSession) -> Void
 
+    /// 外壳每次把这个列表重新显示出来时 +1，用来触发刷新。
+    ///
+    /// 列表是**一直挂着**的子控制器，只靠 isHidden 显隐，所以 `.task` 只会在
+    /// 装上的那一刻跑一次。不带这个 token 的话，隐藏期间新建的会话不会出现，
+    /// 用户看到的是一份过期列表——而且看不出它过期了，这比报错更糟。
+    var reloadToken: Int = 0
+
     private var visible: [DshSession] {
         // 空白会话不进列表：它们没有内容，点进去是一片空白，
         // 而"新建会话"本来就是另一个入口。
@@ -47,7 +54,7 @@ struct SessionListView: View {
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task { await reload() }
+        .task(id: reloadToken) { await reload() }
     }
 
     private var searchField: some View {

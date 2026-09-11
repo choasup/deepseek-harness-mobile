@@ -1,3 +1,4 @@
+import SwiftUI
 import UIKit
 import WebKit
 
@@ -21,6 +22,8 @@ import WebKit
 final class HarnessViewController: UIViewController {
     private var webView: WKWebView!
     private let launchView = UIView()
+    /// 原生会话列表（外壳原生化的第一屏）。与 WebView 并存，不是替换。
+    private var nativeList: UIHostingController<SessionListView>?
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let detailLabel = UILabel()
@@ -218,6 +221,7 @@ final class HarnessViewController: UIViewController {
         webView.scrollView.keyboardDismissMode = .none
 
         view.addSubview(webView)
+        installNativeSessionList()
         let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             // 顶部贴安全区：内容不会钻到灵动岛/状态栏底下。
@@ -313,6 +317,51 @@ final class HarnessViewController: UIViewController {
         pollDeadline = Date().addingTimeInterval(Self.startupTimeout)
         pollStartedAt = Date()
         waitForHostThenLoad()
+    }
+
+    /// 原生会话列表。外壳原生化的第一屏。
+    ///
+    /// 与 WebView **并存**而不是替换：列表原生、对话仍在 WebView 里。
+    /// 点一行之后靠 `window.__dshMobile.openSession(id)` 让网页那边切会话
+    /// ——dsh 的前端没有基于 URL 的路由（查过 apps/web 与 client/runtime，
+    /// 没有任何读 location.search / hash 的代码），所以只能调进去。
+    private func installNativeSessionList() {
+        let host = UIHostingController(
+            rootView: SessionListView { [weak self] session in
+                self?.openSessionInWebView(session.id)
+            },
+        )
+        addChild(host)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        host.didMove(toParent: self)
+        host.view.isHidden = true
+        nativeList = host
+    }
+
+    /// 让网页那边切到某个会话，**成功了才切界面**。
+    ///
+    /// 桥在 id 不认识时返回 false。那时候把 WebView 显出来，用户看到的会是
+    /// 上一个会话的内容——比停在列表上糟得多，也正是今天反复吃亏的那种
+    /// "静默成功"。
+    private func openSessionInWebView(_ id: String) {
+        let escaped = id.replacingOccurrences(of: "'", with: "")
+        let script = "window.__dshMobile?.openSession('\(escaped)') === true"
+        webView.evaluateJavaScript(script) { [weak self] value, error in
+            guard let self else { return }
+            guard value as? Bool == true else {
+                print("[native-list] 网页侧没能打开会话 \(id)：\(error?.localizedDescription ?? "返回 false")")
+                return
+            }
+            self.nativeList?.view.isHidden = true
+            self.webView.isHidden = false
+        }
     }
 
     /// 失败时给**诊断**，不给地址表单。
